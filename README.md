@@ -107,6 +107,20 @@ game tracking.
     `manifest_schema.json` (including the `compatible_versions` semver
     regex) manually, since `jsonschema` itself isn't installed in this
     sandbox.
+11. **Fixed a real bug in the test-mode logo paths**: `logo_path` was
+    passed as a plain string (via `os.path.join`), but the actual
+    `SportsCore._load_and_resize_logo()` calls `logo_path.parent` --
+    which only exists on a `pathlib.Path`, not a string. This worked fine
+    against this sandbox's own simplified test stub (which defensively
+    wrapped everything in `Path(...)` before checking it), masking the
+    bug -- it only surfaced once run against the real method on actual
+    hardware, where it raised `AttributeError`, got silently caught by
+    the existing try/except around logo loading, and fell back to flat
+    color swatches with no visible error. Fixed by switching test-mode
+    logo paths to real `Path` objects, and **also tightened the sandbox's
+    own test stub** to stop defensively wrapping its input, so this class
+    of bug gets caught locally next time instead of only showing up on
+    real hardware.
 
 ## Test mode
 

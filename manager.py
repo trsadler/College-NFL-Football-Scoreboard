@@ -22,6 +22,7 @@ API Version: 1.0.0
 from typing import Dict, Any, Optional, List, Tuple
 import logging
 import os
+from pathlib import Path
 from datetime import datetime, timedelta, timezone
 
 from PIL import Image, ImageDraw, ImageFont
@@ -744,11 +745,11 @@ class NFLCollegeScoreboardPlugin(BasePlugin):
         "league": "nfl",
         "away_abbr": "BUF", "away_id": "2", "away_score": "17",
         "away_color": (0, 51, 141),
-        "away_logo_path": os.path.join(_TEST_LOGO_DIR, "BUF.png"), "away_logo_url": None,
+        "away_logo_path": Path(_TEST_LOGO_DIR) / "BUF.png", "away_logo_url": None,
         "away_timeouts": 2,
         "home_abbr": "KC", "home_id": "12", "home_score": "20",
         "home_color": (227, 24, 55),
-        "home_logo_path": os.path.join(_TEST_LOGO_DIR, "KC.png"), "home_logo_url": None,
+        "home_logo_path": Path(_TEST_LOGO_DIR) / "KC.png", "home_logo_url": None,
         "home_timeouts": 3,
         "period_text": "Q4", "clock": "2:14", "down_distance_text": "3rd & 7",
         "possession_indicator": "away", "possession_text": "BUF 43",
@@ -758,10 +759,10 @@ class NFLCollegeScoreboardPlugin(BasePlugin):
         "league": "nfl",
         "away_abbr": "DAL", "away_id": "6", "away_score": "24",
         "away_color": (0, 34, 68),
-        "away_logo_path": os.path.join(_TEST_LOGO_DIR, "DAL.png"), "away_logo_url": None,
+        "away_logo_path": Path(_TEST_LOGO_DIR) / "DAL.png", "away_logo_url": None,
         "home_abbr": "DET", "home_id": "8", "home_score": "34",
         "home_color": (0, 118, 182),
-        "home_logo_path": os.path.join(_TEST_LOGO_DIR, "DET.png"), "home_logo_url": None,
+        "home_logo_path": Path(_TEST_LOGO_DIR) / "DET.png", "home_logo_url": None,
         "period": 4, "is_final": True, "game_date": "11/30",
         "leaders": [
             {"category": "passingYards", "team_id": "8", "name": "J. Goff", "display_value": "19/23, 258 YDS, 3 TD"},
@@ -772,11 +773,11 @@ class NFLCollegeScoreboardPlugin(BasePlugin):
         "league": "nfl",
         "away_abbr": "GB", "away_id": "9", "away_score": "0",
         "away_color": (24, 48, 40),
-        "away_logo_path": os.path.join(_TEST_LOGO_DIR, "GB.png"), "away_logo_url": None,
+        "away_logo_path": Path(_TEST_LOGO_DIR) / "GB.png", "away_logo_url": None,
         "away_record": "5-3",
         "home_abbr": "CHI", "home_id": "3", "home_score": "0",
         "home_color": (11, 22, 42),
-        "home_logo_path": os.path.join(_TEST_LOGO_DIR, "CHI.png"), "home_logo_url": None,
+        "home_logo_path": Path(_TEST_LOGO_DIR) / "CHI.png", "home_logo_url": None,
         "home_record": "4-4",
         "game_date": "SUN 9/14", "game_time": "1:00PM",
     }
