@@ -129,9 +129,17 @@ real games use -- so this checks the actual render path, not a separate
 mock. Verified the dispatch logic selects the correct game/state for all
 four `view` values, including that `"all"` cycles.
 
-Sample games have `logo_path: None`, so they'll show flat color swatches
-instead of real logos (same fallback behavior as a real logo failing to
-load) -- that's expected in test mode, not a bug.
+Sample games use six real NFL logos (BUF/KC/DAL/DET/GB/CHI, one pair per
+view) bundled in this plugin's own `test_logos/` folder -- pulled directly
+from the actual LEDMatrix core repo's `assets/sports/nfl_logos/`, not
+downloaded or generated. These are for test-mode previewing only; real
+games never touch this folder. Once this runs with real ESPN data, logos
+come from the existing `_load_and_resize_logo()`/`download_missing_logo()`
+pipeline instead (same one the core project and other sports plugins use),
+which fetches straight from ESPN's CDN and caches locally -- that path
+needs real network access to verify, which isn't available in the sandbox
+this was built in, but the code doesn't distinguish test-mode logos from
+real ones; it's the same `logo_path` mechanism either way.
 
 ## Suggested next steps
 
