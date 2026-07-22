@@ -94,6 +94,19 @@ game tracking.
    `update()` picks the single top-priority game and shows only that one;
    `live.game_duration_seconds` is accepted by the schema but nothing
    currently cycles through multiple live games using it.
+10. **Fixed a manifest.json bug that blocked installation entirely**:
+    the core plugin loader requires `display_modes` (checked by
+    `store_manager.py`) plus `compatible_versions`, `requires`, and a few
+    other fields (checked against `schema/manifest_schema.json`) that our
+    original manifest never had -- it was missing `display_modes` and
+    `compatible_versions` outright, which surfaced as "Manifest missing
+    required fields: display_modes" on install. Rebuilt the manifest
+    against a real example (the NHL plugin manifest documented in
+    `PLUGIN_ARCHITECTURE_SPEC.md`) and verified it against both the
+    `store_manager.py` required-field check and the formal
+    `manifest_schema.json` (including the `compatible_versions` semver
+    regex) manually, since `jsonschema` itself isn't installed in this
+    sandbox.
 
 ## Test mode
 
