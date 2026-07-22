@@ -1,0 +1,122 @@
+{
+  "type": "object",
+  "properties": {
+    "enabled": {
+      "type": "boolean",
+      "default": true,
+      "description": "Master on/off switch for the whole plugin."
+    },
+
+    "leagues": {
+      "type": "array",
+      "items": { "type": "string", "enum": ["nfl", "college-football"] },
+      "default": ["nfl"],
+      "description": "Which leagues to pull games from. Each league runs its own ESPN fetch/logo pipeline (see LEAGUE_TO_SPORT_KEY in manager.py) and its games are merged into one rotation."
+    },
+
+    "favorite_teams": {
+      "type": "array",
+      "items": { "type": "string" },
+      "default": ["MSU"],
+      "description": "Team abbreviations to prioritize. Meaning depends on show_favorite_teams_only below."
+    },
+    "show_favorite_teams_only": {
+      "type": "boolean",
+      "default": false,
+      "description": "If true, only ever show games involving a favorite team. If false, show all games but let live_priority/favorite ordering below still apply."
+    },
+
+    "live": {
+      "type": "object",
+      "description": "Currently-in-progress games.",
+      "properties": {
+        "enabled": { "type": "boolean", "default": true },
+        "show_all_live": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show every live game, not just favorite teams' (ignored if show_favorite_teams_only is true)."
+        },
+        "live_priority": {
+          "type": "boolean",
+          "default": true,
+          "description": "If any favorite team is currently live, jump to/stay on that game ahead of other live games in the rotation."
+        },
+        "update_interval_seconds": {
+          "type": "number",
+          "default": 15,
+          "description": "How often to poll ESPN while a game is live. Lower = more current, more API calls."
+        },
+        "game_duration_seconds": {
+          "type": "number",
+          "default": 20,
+          "description": "How long to hold on one live game before rotating to the next (if multiple are live)."
+        }
+      }
+    },
+
+    "upcoming": {
+      "type": "object",
+      "description": "Scheduled games that haven't started yet.",
+      "properties": {
+        "enabled": { "type": "boolean", "default": true },
+        "games_to_show": {
+          "type": "integer",
+          "default": 10,
+          "description": "Max number of upcoming games to include in the rotation."
+        },
+        "game_duration_seconds": { "type": "number", "default": 15 },
+        "update_interval_seconds": { "type": "number", "default": 3600 }
+      }
+    },
+
+    "recent": {
+      "type": "object",
+      "description": "Final/completed games.",
+      "properties": {
+        "enabled": { "type": "boolean", "default": true },
+        "games_to_show": {
+          "type": "integer",
+          "default": 5,
+          "description": "Max number of recent final games to include in the rotation."
+        },
+        "game_duration_seconds": { "type": "number", "default": 15 },
+        "update_interval_seconds": { "type": "number", "default": 3600 }
+      }
+    },
+
+    "show_records": {
+      "type": "boolean",
+      "default": false,
+      "description": "Show each team's W-L record."
+    },
+    "show_ranking": {
+      "type": "boolean",
+      "default": false,
+      "description": "Show AP/CFP ranking instead of record when both are enabled (college only -- no-op for NFL games)."
+    },
+    "show_odds": {
+      "type": "boolean",
+      "default": false,
+      "description": "Show betting odds when ESPN provides them."
+    },
+
+    "display_duration": {
+      "type": "number",
+      "default": 15,
+      "description": "Fallback duration (seconds) used by the core rotation when a more specific *_duration_seconds above doesn't apply."
+    },
+    "test_mode": {
+      "type": "object",
+      "description": "Preview sample data for a view directly on the display, without needing a real live/recent/upcoming game -- useful for checking how a layout actually looks on real hardware.",
+      "properties": {
+        "enabled": { "type": "boolean", "default": false },
+        "view": {
+          "type": "string",
+          "enum": ["live", "recent", "upcoming", "all"],
+          "default": "live",
+          "description": "Which sample view to show. \"all\" cycles through all three every display_duration."
+        }
+      }
+    }
+  }
+}

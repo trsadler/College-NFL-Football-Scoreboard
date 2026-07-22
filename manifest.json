@@ -1,0 +1,18 @@
+{
+  "id": "nfl-college-scoreboard",
+  "name": "NFL/College Scoreboard",
+  "version": "0.1.0",
+  "author": "Thomas",
+  "description": "Custom NFL/NCAA football scoreboard: team stack with logo/score/timeouts, simulated field with yard lines and ball position indicator. Includes past scores and upcoming games.",
+  "entry_point": "manager.py",
+  "class_name": "NFLCollegeScoreboardPlugin",
+  "category": "sports",
+  "display": {
+    "design_size": {
+      "width": 128,
+      "height": 32
+    }
+  },
+  "update_interval": 15,
+  "display_duration": 15
+}
