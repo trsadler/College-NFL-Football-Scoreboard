@@ -210,6 +210,41 @@ game tracking.
     path -- confirmed it now surfaces as `FETCH FAILED` instead of
     silently returning nothing, matching the fix already verified for
     recent/upcoming.
+18. **Corrected a claim from item 17**: `_RecentDataWorker`/`_UpcomingDataWorker`
+    only override `_fetch_data()`, not `update()` itself -- and the
+    *inherited* `SportsRecent.update()`/`SportsUpcoming.update()` (core
+    code, called directly as `worker.update()`) has its OWN try/except
+    wrapped around the call to `_fetch_data()`, which catches our
+    now-propagating exception and logs it as `"Error updating recent
+    games: {e}"` -- **before** it ever reaches this plugin's own
+    diagnostic logging. That handler does not re-raise. So the `FETCH
+    FAILED` messages from items 16/17 likely never actually fire for
+    this path in practice; the real 403 was already visible via the
+    core method's own logging the whole time, just under a different
+    message format than this plugin's own. The underlying propagation
+    fix (letting real HTTP errors raise instead of silently returning
+    empty) is still correct and still needed -- the visibility claim
+    specifically was overstated.
+19. **The browser-header fix (item 15) was tested on real hardware and
+    did NOT resolve the 403** -- confirmed via a real log line during
+    the actual live game, after confirming the deployed code did include
+    that fix. That rules out "generic User-Agent string" as a
+    sufficient explanation on its own (both a custom app name AND a
+    full browser-mimicking header set produced the same 403).
+    Reconsidered what's actually unusual about these requests
+    independent of headers: `limit=1000` combined with a 21-day (recent)
+    or 14-day (upcoming) date range is not a shape a real browser would
+    ever request -- browsing espn.com never asks for three weeks of
+    scoreboard data in one call. Narrowed `limit` to 100 and both date
+    ranges to 7 days, on the theory that the *parameter shape* itself
+    may be triggering rejection independent of headers. **Not yet
+    confirmed working** -- same sandbox limitation as every other
+    attempt at this specific problem. Also a real trade-off to flag:
+    narrowing the recent-games window from 21 to 7 days means games
+    older than a week won't be found even though `SportsRecent.update()`'s
+    own internal filter would otherwise allow up to 21 -- prioritized
+    getting any data through at all over the full window, but this
+    should be revisited once something actually works.
 
 ## Test mode
 

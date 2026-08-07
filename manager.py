@@ -369,7 +369,10 @@ class _LiveDataWorker(_ExtractionMixin, FootballLive):
         url = f"https://site.api.espn.com/apis/site/v2/sports/{self.sport}/{self.league}/scoreboard"
         response = self.session.get(
             url,
-            params={"dates": f"{yesterday.strftime('%Y%m%d')}-{now.strftime('%Y%m%d')}", "limit": 1000},
+            # limit dropped from 1000 to 100 -- see _fetch_schedule_direct's
+            # docstring for why (100 is still far more than one day's worth
+            # of games, so this doesn't risk missing anything real).
+            params={"dates": f"{yesterday.strftime('%Y%m%d')}-{now.strftime('%Y%m%d')}", "limit": 100},
             headers=self.headers,
             timeout=10,
         )
@@ -389,14 +392,24 @@ def _fetch_schedule_direct(worker, start, end) -> List[Dict]:
     to what a genuinely empty schedule looks like, because the core method
     swallowed the actual error before we ever got a chance to see it. This
     duplicates just enough of fetch_schedule's request logic to let a real
-    HTTP error propagate as an exception, so our update()'s existing
-    "FETCH FAILED" logging can actually catch and report it instead of it
-    silently presenting as an empty result.
+    HTTP error propagate as an exception.
+
+    NOTE: two header strategies (custom app name, then full browser
+    mimicking) have BOTH still gotten a real 403 on real hardware, so the
+    header theory alone is looking insufficient. `limit=1000` and, in the
+    recent/upcoming callers below, a 21/14-day date range are not
+    request shapes a real browser would ever construct (browsing espn.com
+    never asks for three weeks of scoreboard data in one call) -- that
+    parameter shape alone is plausible grounds for rejection independent
+    of headers. Narrowed both `limit` (1000 -> 100) and the callers' date
+    ranges as another attempt. NOT YET CONFIRMED -- same fundamental
+    limitation as the header fixes: no way to test ESPN's real rejection
+    behavior from this sandbox.
     """
     url = f"{worker.data_source.base_url}/{worker.sport}/{worker.league}/scoreboard"
     params = {
         "dates": f"{start.strftime('%Y%m%d')}-{end.strftime('%Y%m%d')}",
-        "limit": 1000,
+        "limit": 100,
     }
     response = worker.data_source.session.get(
         url, headers=worker.data_source.get_headers(), params=params, timeout=15
@@ -415,11 +428,15 @@ class _RecentDataWorker(_ExtractionMixin, Football, SportsRecent):
     """
 
     def _fetch_data(self) -> Optional[Dict]:
-        # SportsRecent.update() itself filters to a 21-day-back cutoff, so
-        # the fetch window needs to be at least that wide or there'd be
-        # nothing for that filter to find.
+        # Narrowed from 21 days to 7: SportsRecent.update() itself filters
+        # to a 21-day-back cutoff, but a request for the last 7 days still
+        # catches essentially any real "recent" game while looking far
+        # less like scraper traffic than a 3-week request. If this turns
+        # out to lose games that are genuinely 8-21 days old, that's a
+        # real trade-off to revisit -- for now, prioritizing getting ANY
+        # data through over the full window.
         now = datetime.now(timezone.utc)
-        start = now - timedelta(days=21)
+        start = now - timedelta(days=7)
         events = _fetch_schedule_direct(self, start, now)
         return {"events": events}
 
@@ -432,8 +449,9 @@ class _UpcomingDataWorker(_ExtractionMixin, Football, SportsUpcoming):
     """
 
     def _fetch_data(self) -> Optional[Dict]:
+        # Narrowed from 14 days to 7, same reasoning as _RecentDataWorker.
         now = datetime.now(timezone.utc)
-        end = now + timedelta(days=14)
+        end = now + timedelta(days=7)
         events = _fetch_schedule_direct(self, now, end)
         return {"events": events}
 
