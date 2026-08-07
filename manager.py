@@ -358,6 +358,34 @@ class _LiveDataWorker(_ExtractionMixin, FootballLive):
         return self._fetch_todays_games()
 
 
+def _fetch_schedule_direct(worker, start, end) -> List[Dict]:
+    """
+    Bypasses ESPNDataSource.fetch_schedule() and makes the request directly.
+
+    Why: that method catches ALL exceptions internally (including HTTP
+    errors like a 403) and just returns an empty list -- it never re-raises.
+    That's what made a real 403 Forbidden (confirmed on real hardware,
+    2026-08-06, during a genuinely live game) invisible to this plugin's own
+    error handling: our update() only ever saw "0 games found," identical
+    to what a genuinely empty schedule looks like, because the core method
+    swallowed the actual error before we ever got a chance to see it. This
+    duplicates just enough of fetch_schedule's request logic to let a real
+    HTTP error propagate as an exception, so our update()'s existing
+    "FETCH FAILED" logging can actually catch and report it instead of it
+    silently presenting as an empty result.
+    """
+    url = f"{worker.data_source.base_url}/{worker.sport}/{worker.league}/scoreboard"
+    params = {
+        "dates": f"{start.strftime('%Y%m%d')}-{end.strftime('%Y%m%d')}",
+        "limit": 1000,
+    }
+    response = worker.data_source.session.get(
+        url, headers=worker.data_source.get_headers(), params=params, timeout=15
+    )
+    response.raise_for_status()  # raises on 4xx/5xx, unlike fetch_schedule which swallows this
+    return response.json().get("events", [])
+
+
 class _RecentDataWorker(_ExtractionMixin, Football, SportsRecent):
     """
     One instance per configured league, for completed (final) games.
@@ -373,7 +401,7 @@ class _RecentDataWorker(_ExtractionMixin, Football, SportsRecent):
         # nothing for that filter to find.
         now = datetime.now(timezone.utc)
         start = now - timedelta(days=21)
-        events = self.data_source.fetch_schedule(self.sport, self.league, (start, now))
+        events = _fetch_schedule_direct(self, start, now)
         return {"events": events}
 
 
@@ -387,7 +415,7 @@ class _UpcomingDataWorker(_ExtractionMixin, Football, SportsUpcoming):
     def _fetch_data(self) -> Optional[Dict]:
         now = datetime.now(timezone.utc)
         end = now + timedelta(days=14)
-        events = self.data_source.fetch_schedule(self.sport, self.league, (now, end))
+        events = _fetch_schedule_direct(self, now, end)
         return {"events": events}
 
 
@@ -439,16 +467,36 @@ class NFLCollegeScoreboardPlugin(BasePlugin):
         "college-football": "ncaa_fb",
     }
 
-    _USER_AGENT = "LEDMatrix-NFLCollegeScoreboard/1.0"
+    # A realistic browser User-Agent, not a custom app-identifying string.
+    # UPDATED after real-world evidence: the baseball plugin's original fix
+    # (a distinct app name like "LEDMatrix-TidbytBaseball/1.0") was applied
+    # here first as "LEDMatrix-NFLCollegeScoreboard/1.0", but a real 403
+    # Forbidden from ESPN was confirmed on real hardware with that fix
+    # already deployed (2026-08-06, during the actual live Hall of Fame
+    # Game) -- so a custom app-identifying UA is NOT sufficient on its own.
+    # Switched to mimicking an actual browser instead, on the theory that a
+    # distinctive app-name string may be MORE conspicuous to bot detection
+    # than a generic one, not less. This is a genuine guess, not confirmed
+    # to fix the 403 -- needs verification against a real game.
+    _USER_AGENT = (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    )
+    _BROWSER_HEADERS = {
+        "User-Agent": _USER_AGENT,
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Referer": "https://www.espn.com/",
+        "Origin": "https://www.espn.com",
+    }
 
     def _apply_user_agent_fix(self, worker) -> None:
         """
-        Same fix the baseball plugin applied for the same underlying
-        problem: ESPN started rejecting some User-Agent strings, and the
-        core project's default ones are generic, unfilled-placeholder
-        values shared verbatim across every LEDMatrix install --
-        `SportsCore.__init__` sets `self.headers['User-Agent']` to
-        `'LEDMatrix/1.0 (https://github.com/yourusername/LEDMatrix;
+        Same underlying problem the baseball plugin hit: ESPN rejecting
+        requests. The core project's default headers are generic,
+        unfilled-placeholder values shared verbatim across every LEDMatrix
+        install -- `SportsCore.__init__` sets `self.headers['User-Agent']`
+        to `'LEDMatrix/1.0 (https://github.com/yourusername/LEDMatrix;
         contact@example.com)'` (literally never filled in), and
         `ESPNDataSource.get_headers()` separately returns a different
         generic `'LEDMatrix/1.0'`. These are two SEPARATE header paths --
@@ -456,15 +504,19 @@ class NFLCollegeScoreboardPlugin(BasePlugin):
         `fetch_schedule()` (recent/upcoming) goes through
         `self.data_source.get_headers()` -- so both need overriding, not
         just one, or only some of our fetches would get the fix.
+
+        NOT YET CONFIRMED WORKING: a first attempt at this fix (a custom
+        app-identifying User-Agent) was deployed to real hardware and
+        still got a real 403 Forbidden from ESPN during a genuinely live
+        game. This version tries mimicking a real browser's full header
+        set instead -- needs the same real-hardware verification before
+        trusting it either.
         """
         if hasattr(worker, "headers"):
             worker.headers = dict(worker.headers)
-            worker.headers["User-Agent"] = self._USER_AGENT
+            worker.headers.update(self._BROWSER_HEADERS)
         if hasattr(worker, "data_source") and worker.data_source is not None:
-            worker.data_source.get_headers = lambda: {
-                "User-Agent": self._USER_AGENT,
-                "Accept": "application/json",
-            }
+            worker.data_source.get_headers = lambda: dict(self._BROWSER_HEADERS)
 
     def __init__(self, plugin_id: str, config: Dict[str, Any],
                  display_manager: Any, cache_manager: Any, plugin_manager: Any):
@@ -482,14 +534,33 @@ class NFLCollegeScoreboardPlugin(BasePlugin):
                 continue
 
             worker_config = self._build_worker_config(sport_key)
-            for worker_dict, worker_cls in (
-                (self.live_workers, _LiveDataWorker),
-                (self.recent_workers, _RecentDataWorker),
-                (self.upcoming_workers, _UpcomingDataWorker),
+            for worker_dict, worker_cls, label in (
+                (self.live_workers, _LiveDataWorker, "live"),
+                (self.recent_workers, _RecentDataWorker, "recent"),
+                (self.upcoming_workers, _UpcomingDataWorker, "upcoming"),
             ):
-                worker = worker_cls(
-                    worker_config, display_manager, cache_manager, self.logger, sport_key=sport_key
-                )
+                try:
+                    worker = worker_cls(
+                        worker_config, display_manager, cache_manager, self.logger, sport_key=sport_key
+                    )
+                except Exception as e:
+                    # If this is silently failing on real hardware, it would
+                    # explain "only test mode works" perfectly: __init__
+                    # would still complete overall (this loop just skips the
+                    # broken worker type), so the plugin loads fine and test
+                    # mode (which never touches these workers) works, but
+                    # this league/state combination would have no worker to
+                    # call in update() at all -- not caught there, since
+                    # there'd be nothing in the dict to iterate over and log
+                    # a failure for. Logging it here specifically so a
+                    # construction failure is visible instead of silently
+                    # invisible.
+                    self.logger.error(
+                        f"WORKER CONSTRUCTION FAILED for {label}/{league} "
+                        f"(sport_key={sport_key}): {type(e).__name__}: {e}",
+                        exc_info=True,
+                    )
+                    continue
                 # Football.__init__ sets self.sport = "football" but never sets
                 # self.league -- and SportsCore's fetch methods build the actual
                 # ESPN URL as f".../sports/{self.sport}/{self.league}/...", so
@@ -498,6 +569,14 @@ class NFLCollegeScoreboardPlugin(BasePlugin):
                 worker.league = league
                 self._apply_user_agent_fix(worker)
                 worker_dict[league] = worker
+
+        self.logger.info(
+            f"Plugin initialized: live_workers={list(self.live_workers.keys())}, "
+            f"recent_workers={list(self.recent_workers.keys())}, "
+            f"upcoming_workers={list(self.upcoming_workers.keys())}. If any of these "
+            f"lists are empty but you configured that league, check the logs above "
+            f"for a WORKER CONSTRUCTION FAILED line."
+        )
 
         self.current_game: Optional[Dict] = None
         self.current_state: Optional[str] = None  # "live" | "recent" | "upcoming"
@@ -838,6 +917,20 @@ class NFLCollegeScoreboardPlugin(BasePlugin):
             self._update_test_mode(test_cfg.get("view", "live"))
             return
 
+        # Diagnostic logging, same purpose as the baseball plugin's: if
+        # nothing ever displays in real (non-test) mode, these logs are
+        # what tells us whether update() is even being called on schedule,
+        # whether the fetch itself is failing, or whether it's succeeding
+        # but genuinely finding zero games. Without this, "nothing shows
+        # up" could mean any of several different problems that all need
+        # different fixes.
+        self.logger.debug(
+            f"update() called: leagues={list(self.live_workers.keys())}, "
+            f"live_enabled={self.config.get('live', {}).get('enabled', True)}, "
+            f"recent_enabled={self.config.get('recent', {}).get('enabled', True)}, "
+            f"upcoming_enabled={self.config.get('upcoming', {}).get('enabled', True)}"
+        )
+
         favorite_teams = self.config.get("favorite_teams", [])
         live_cfg = self.config.get("live", {})
         recent_cfg = self.config.get("recent", {})
@@ -853,50 +946,81 @@ class NFLCollegeScoreboardPlugin(BasePlugin):
 
         if live_cfg.get("enabled", True):
             all_live: List[Dict] = []
-            for worker in self.live_workers.values():
+            for league, worker in self.live_workers.items():
                 try:
                     worker.update()
                 except Exception as e:
-                    self.logger.error(f"Error updating live worker for '{worker.league}': {e}", exc_info=True)
+                    self.logger.error(
+                        f"FETCH FAILED for live/{league}: {type(e).__name__}: {e}", exc_info=True
+                    )
                     continue
-                all_live.extend(getattr(worker, "live_games", None) or [])
+                games = getattr(worker, "live_games", None) or []
+                self.logger.info(f"Fetched live/{league} OK: {len(games)} live game(s)")
+                all_live.extend(games)
             if all_live:
                 if live_cfg.get("live_priority", True):
                     all_live = self._favorite_first(all_live, favorite_teams)
                 self.current_game = all_live[0]
                 self.current_state = "live"
+                self.logger.info(
+                    f"Showing LIVE: {self.current_game.get('away_abbr')}@"
+                    f"{self.current_game.get('home_abbr')}"
+                )
                 return
 
         if recent_cfg.get("enabled", True):
             all_recent: List[Dict] = []
-            for worker in self.recent_workers.values():
+            for league, worker in self.recent_workers.items():
                 try:
                     worker.update()
                 except Exception as e:
-                    self.logger.error(f"Error updating recent worker for '{worker.league}': {e}", exc_info=True)
+                    self.logger.error(
+                        f"FETCH FAILED for recent/{league}: {type(e).__name__}: {e}", exc_info=True
+                    )
                     continue
-                all_recent.extend(getattr(worker, "games_list", None) or [])
+                games = getattr(worker, "games_list", None) or []
+                self.logger.info(f"Fetched recent/{league} OK: {len(games)} recent game(s)")
+                all_recent.extend(games)
             if all_recent:
                 all_recent = self._favorite_first(all_recent, favorite_teams)
                 self.current_game = all_recent[0]
                 self.current_state = "recent"
+                self.logger.info(
+                    f"Showing RECENT: {self.current_game.get('away_abbr')}@"
+                    f"{self.current_game.get('home_abbr')}"
+                )
                 return
 
         if upcoming_cfg.get("enabled", True):
             all_upcoming: List[Dict] = []
-            for worker in self.upcoming_workers.values():
+            for league, worker in self.upcoming_workers.items():
                 try:
                     worker.update()
                 except Exception as e:
-                    self.logger.error(f"Error updating upcoming worker for '{worker.league}': {e}", exc_info=True)
+                    self.logger.error(
+                        f"FETCH FAILED for upcoming/{league}: {type(e).__name__}: {e}", exc_info=True
+                    )
                     continue
-                all_upcoming.extend(getattr(worker, "games_list", None) or [])
+                games = getattr(worker, "games_list", None) or []
+                self.logger.info(f"Fetched upcoming/{league} OK: {len(games)} upcoming game(s)")
+                all_upcoming.extend(games)
             if all_upcoming:
                 all_upcoming = self._favorite_first(all_upcoming, favorite_teams)
                 self.current_game = all_upcoming[0]
                 self.current_state = "upcoming"
+                self.logger.info(
+                    f"Showing UPCOMING: {self.current_game.get('away_abbr')}@"
+                    f"{self.current_game.get('home_abbr')}"
+                )
                 return
 
+        self.logger.warning(
+            "No games found across live/recent/upcoming for any configured league -- "
+            "current_game will be None and display() will show nothing. If fetches "
+            "above show 0 games rather than FETCH FAILED, the fetch itself is working "
+            "but genuinely found nothing (check date range/season/leagues config); if "
+            "you see FETCH FAILED, that's the actual problem to chase."
+        )
         self.current_game = None
         self.current_state = None
 

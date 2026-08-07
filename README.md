@@ -150,6 +150,47 @@ game tracking.
     against a historical play-by-play record (see the earlier fix), not
     a genuinely live top-level `situation` block -- worth re-fetching
     after kickoff.
+14. **Added baseball-style diagnostic logging** to `update()` and
+    `__init__()`, for the same reason baseball's README describes: "only
+    test mode works" is ambiguous on its own -- it could mean `__init__`
+    is failing (though that would break test mode too, since worker
+    construction is unconditional), `update()` never getting called, the
+    fetch itself failing, or the fetch succeeding but genuinely finding
+    zero games. `update()` now logs `Fetched {state}/{league} OK: N
+    game(s)` on success or `FETCH FAILED: {exception}` on failure for
+    each state/league, plus a summary when nothing is found at all;
+    `__init__` logs a `WORKER CONSTRUCTION FAILED` line if a specific
+    worker type fails to build, and an overall summary of which
+    live/recent/upcoming workers actually got created. Verified both the
+    "success but empty" and "real exception" cases produce distinctly
+    different log output.
+15. **Real 403 Forbidden confirmed on real hardware, during the actual live
+    Hall of Fame Game (2026-08-06)** -- ESPN rejected the recent/upcoming
+    fetch (`fetch_schedule`'s `dates=` range request) with a genuine 403,
+    even with the User-Agent fix from item 12 already deployed. That
+    disproves the theory that a distinct app-identifying User-Agent alone
+    is sufficient -- confirmed not sufficient, not just unconfirmed.
+    Switched `_apply_user_agent_fix()` to mimic a real browser's full
+    header set (User-Agent, Accept, Accept-Language, Referer, Origin)
+    instead of a custom app name, on the theory that a distinctive
+    app-identifying string may be MORE conspicuous to bot detection, not
+    less. **This replacement is also not yet confirmed working** -- same
+    limitation as before, no way to test ESPN's actual rejection behavior
+    from this sandbox.
+16. **Found and fixed a real visibility gap this 403 exposed**: the core
+    `ESPNDataSource.fetch_schedule()` catches ALL exceptions internally
+    (including HTTP errors) and returns an empty list rather than
+    re-raising -- so the 403 in item 15 was completely invisible to this
+    plugin's own error handling; `update()` only ever saw "0 games found,"
+    indistinguishable from a genuinely empty schedule, and the only reason
+    the 403 was visible at all was the core method's own separate log
+    line. Added `_fetch_schedule_direct()`, which duplicates just enough
+    of `fetch_schedule`'s request logic to let real HTTP errors propagate
+    as exceptions, so they now surface as `FETCH FAILED: HTTPError: 403
+    ...` through the item-14 diagnostic logging instead of silently
+    presenting as an empty result. Verified against a simulated 403 using
+    the exact URL/params from the real error log -- confirmed it now
+    surfaces correctly instead of being swallowed.
 
 ## Test mode
 
