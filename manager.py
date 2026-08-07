@@ -570,6 +570,22 @@ class NFLCollegeScoreboardPlugin(BasePlugin):
                 self.logger.warning("Unknown league '%s' in config, skipping", league)
                 continue
 
+            # ONE shared session per league, used by all three workers
+            # (live/recent/upcoming) instead of each constructing its own.
+            # Real finding: baseball's plugin (which works fine, confirmed
+            # on the same Pi/IP at the same time our football requests were
+            # getting 403'd) uses a single requests.Session() for
+            # everything. Our workers were each independently creating TWO
+            # separate sessions apiece (one via SportsCore.__init__'s
+            # self.session, another via Football.__init__'s
+            # self.data_source.session) -- up to 6 separate sessions per
+            # league firing requests within the same update() cycle. That's
+            # a real, confirmed architectural difference from the plugin
+            # that's actually working; consolidating to one shared session
+            # is a genuine attempt at closing that gap, not just another
+            # header guess.
+            shared_session = requests.Session()
+
             worker_config = self._build_worker_config(sport_key)
             for worker_dict, worker_cls, label in (
                 (self.live_workers, _LiveDataWorker, "live"),
@@ -605,6 +621,11 @@ class NFLCollegeScoreboardPlugin(BasePlugin):
                 # entirely (".../sports/football//scoreboard").
                 worker.league = league
                 self._apply_user_agent_fix(worker)
+                # Replace both of this worker's independently-created
+                # sessions with the one shared session for this league.
+                worker.session = shared_session
+                if hasattr(worker, "data_source") and worker.data_source is not None:
+                    worker.data_source.session = shared_session
                 worker_dict[league] = worker
 
         self.logger.info(

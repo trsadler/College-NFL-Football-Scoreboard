@@ -245,6 +245,35 @@ game tracking.
     own internal filter would otherwise allow up to 21 -- prioritized
     getting any data through at all over the full window, but this
     should be revisited once something actually works.
+20. **The narrowed request-shape fix (item 19) was ALSO tested on real
+    hardware and did NOT resolve the 403** -- confirmed via another real
+    log line, same message, now showing the narrowed `dates=20260731-
+    20260807&limit=100`. Three different theories (custom User-Agent,
+    full browser headers, narrowed request shape) have now all failed
+    identically. Rather than guess a fourth header/parameter variation,
+    asked for a real diagnostic instead: whether the baseball plugin
+    (already running on this same Pi) was fetching live ESPN data
+    successfully at the same moment football was getting 403'd.
+    **Confirmed baseball was working fine** -- same IP, same Pi, same
+    moment. That rules out IP-level blocking, a general ESPN outage, and
+    local network issues entirely; the problem is specific to something
+    this plugin's requests do differently from baseball's.
+21. **Found a real, confirmed architectural difference from baseball**:
+    baseball uses a single `requests.Session()` for everything. This
+    plugin's per-league workers (live/recent/upcoming) were each
+    independently constructing their own session -- in fact *two* each
+    (`SportsCore.__init__`'s `self.session`, and a separate one inside
+    `Football.__init__`'s `self.data_source`) -- meaning up to 6 separate
+    sessions per league, all potentially firing requests within the same
+    `update()` cycle. Consolidated to one shared `requests.Session()` per
+    league, assigned to every worker's `.session` and
+    `.data_source.session`. Verified via direct object-identity checks
+    (not just "it compiles") that all three workers for a league now
+    share the exact same session object on both attributes. **Not yet
+    confirmed this resolves the 403** -- this is the first fix attempt
+    grounded in a real, confirmed difference from a working plugin rather
+    than a guess at header/parameter values, but it still needs testing
+    against the real ESPN rejection before trusting it.
 
 ## Test mode
 
