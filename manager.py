@@ -24,6 +24,8 @@ import logging
 import os
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
+import pytz
+import requests
 
 from PIL import Image, ImageDraw, ImageFont
 
@@ -352,10 +354,27 @@ class _LiveDataWorker(_ExtractionMixin, FootballLive):
     """
 
     def _fetch_data(self) -> Optional[Dict]:
-        # _fetch_todays_games() already exists on SportsCore and builds the
-        # correct ESPN URL from self.sport/self.league -- it just needed
-        # something to actually call it.
-        return self._fetch_todays_games()
+        # NOT calling self._fetch_todays_games() directly -- confirmed it
+        # has the EXACT same silent-swallowing problem _fetch_schedule()
+        # had (see _fetch_schedule_direct() below): it catches
+        # requests.exceptions.RequestException internally and returns None
+        # instead of re-raising, which would make a real HTTP error (like
+        # the 403 confirmed on real hardware for the recent/upcoming path)
+        # invisible to this plugin's own diagnostic logging the same way.
+        # This replicates its request logic directly so real errors
+        # propagate as exceptions instead.
+        tz = pytz.timezone("America/New_York")
+        now = datetime.now(tz)
+        yesterday = now - timedelta(days=1)
+        url = f"https://site.api.espn.com/apis/site/v2/sports/{self.sport}/{self.league}/scoreboard"
+        response = self.session.get(
+            url,
+            params={"dates": f"{yesterday.strftime('%Y%m%d')}-{now.strftime('%Y%m%d')}", "limit": 1000},
+            headers=self.headers,
+            timeout=10,
+        )
+        response.raise_for_status()  # raises on 4xx/5xx, unlike _fetch_todays_games which swallows this
+        return {"events": response.json().get("events", [])}
 
 
 def _fetch_schedule_direct(worker, start, end) -> List[Dict]:

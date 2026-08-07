@@ -191,6 +191,25 @@ game tracking.
     presenting as an empty result. Verified against a simulated 403 using
     the exact URL/params from the real error log -- confirmed it now
     surfaces correctly instead of being swallowed.
+17. **Found and fixed the exact same visibility gap in the LIVE path.**
+    After item 16's fix, "plugin is not initializing" turned out to still
+    be happening (confirmed via a direct question: test mode still worked,
+    which rules out `__init__`/construction -- the failure had to be in
+    the real-data fetch path specifically). Checked whether
+    `_fetch_todays_games()` (used by the live worker, separate code path
+    from `fetch_schedule()`) had the same problem: it does -- catches
+    `requests.exceptions.RequestException` internally and returns `None`
+    instead of re-raising, exactly like item 16's bug, just in a different
+    method. This one had gone unnoticed because all prior testing/analysis
+    focused on the recent/upcoming 403 specifically. `_LiveDataWorker`
+    now bypasses `_fetch_todays_games()` the same way `_RecentDataWorker`/
+    `_UpcomingDataWorker` bypass `fetch_schedule()` -- replicates its exact
+    request logic (including the `pytz` America/New_York timezone handling
+    it uses, now added as an explicit dependency) but lets real HTTP
+    errors propagate. Verified against a simulated 403 on this specific
+    path -- confirmed it now surfaces as `FETCH FAILED` instead of
+    silently returning nothing, matching the fix already verified for
+    recent/upcoming.
 
 ## Test mode
 
