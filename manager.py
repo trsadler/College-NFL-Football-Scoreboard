@@ -439,6 +439,33 @@ class NFLCollegeScoreboardPlugin(BasePlugin):
         "college-football": "ncaa_fb",
     }
 
+    _USER_AGENT = "LEDMatrix-NFLCollegeScoreboard/1.0"
+
+    def _apply_user_agent_fix(self, worker) -> None:
+        """
+        Same fix the baseball plugin applied for the same underlying
+        problem: ESPN started rejecting some User-Agent strings, and the
+        core project's default ones are generic, unfilled-placeholder
+        values shared verbatim across every LEDMatrix install --
+        `SportsCore.__init__` sets `self.headers['User-Agent']` to
+        `'LEDMatrix/1.0 (https://github.com/yourusername/LEDMatrix;
+        contact@example.com)'` (literally never filled in), and
+        `ESPNDataSource.get_headers()` separately returns a different
+        generic `'LEDMatrix/1.0'`. These are two SEPARATE header paths --
+        `_fetch_todays_games()` (live) uses `self.headers`, while
+        `fetch_schedule()` (recent/upcoming) goes through
+        `self.data_source.get_headers()` -- so both need overriding, not
+        just one, or only some of our fetches would get the fix.
+        """
+        if hasattr(worker, "headers"):
+            worker.headers = dict(worker.headers)
+            worker.headers["User-Agent"] = self._USER_AGENT
+        if hasattr(worker, "data_source") and worker.data_source is not None:
+            worker.data_source.get_headers = lambda: {
+                "User-Agent": self._USER_AGENT,
+                "Accept": "application/json",
+            }
+
     def __init__(self, plugin_id: str, config: Dict[str, Any],
                  display_manager: Any, cache_manager: Any, plugin_manager: Any):
         super().__init__(plugin_id, config, display_manager, cache_manager, plugin_manager)
@@ -469,6 +496,7 @@ class NFLCollegeScoreboardPlugin(BasePlugin):
                 # without this the URL would be missing its league segment
                 # entirely (".../sports/football//scoreboard").
                 worker.league = league
+                self._apply_user_agent_fix(worker)
                 worker_dict[league] = worker
 
         self.current_game: Optional[Dict] = None

@@ -121,6 +121,35 @@ game tracking.
     own test stub** to stop defensively wrapping its input, so this class
     of bug gets caught locally next time instead of only showing up on
     real hardware.
+12. **Applied the same User-Agent fix as the baseball plugin**: ESPN
+    started rejecting some User-Agent strings (per real-world testing
+    on the baseball plugin). Traced this plugin's two SEPARATE header
+    paths -- `_fetch_todays_games()` (used by the live worker) sends
+    `self.headers['User-Agent']`, which `SportsCore.__init__` sets to a
+    literal unfilled placeholder,
+    `'LEDMatrix/1.0 (https://github.com/yourusername/LEDMatrix;
+    contact@example.com)'`, identical across every LEDMatrix install;
+    `fetch_schedule()` (used by the recent/upcoming workers) instead goes
+    through `ESPNDataSource.get_headers()`, a different but equally
+    generic `'LEDMatrix/1.0'`. Both get overridden now, via
+    `_apply_user_agent_fix()` called on every worker right after
+    construction, with a distinct per-plugin User-Agent
+    (`LEDMatrix-NFLCollegeScoreboard/1.0`), matching the fix pattern
+    baseball already validated. **Not verified from this sandbox** --
+    there's no raw network access here (bash networking is disabled, and
+    `web_fetch` doesn't expose custom headers), so this couldn't be
+    tested against ESPN's actual rejection behavior directly; needs
+    confirming on real hardware.
+13. **Pulled real live ESPN data for the first time** (previously only
+    possible against historical play-by-play records, since it was the
+    offseason) -- the 2026 Hall of Fame Game (CAR @ ARI) was pulled
+    directly from the real scoreboard endpoint, but was still
+    `STATUS_SCHEDULED`/state `"pre"` (8:00 PM ET kickoff hadn't happened
+    yet) at fetch time, so this didn't yet exercise the live `situation`
+    object. The yard-line/possession logic is still only verified
+    against a historical play-by-play record (see the earlier fix), not
+    a genuinely live top-level `situation` block -- worth re-fetching
+    after kickoff.
 
 ## Test mode
 
