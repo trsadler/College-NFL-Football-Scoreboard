@@ -1,9 +1,14 @@
 """
 NFL/College Scoreboard Plugin for LEDMatrix
 
-Reuses the core project's ESPN data-fetching (src.base_classes.football.FootballLive)
-for pulling and normalizing live game data, but completely replaces the built-in
-_draw_scorebug_layout() with our own custom pixel-perfect layout:
+Fully standalone (own requests.Session(), own complete ESPN fetch and
+extraction logic) -- mirrors baseball's own current, real-hardware-
+confirmed-working architecture. The core's shared sports base classes
+this plugin originally depended on (src.base_classes.football/sports)
+were removed entirely when LEDMatrix deprecated built-in managers in
+favor of standalone plugins; see the imports section below for how that
+was confirmed. Implements its own _draw_scorebug_layout() with a custom
+pixel-perfect layout:
   - Left: stacked team logos, abbreviation + score (side-by-side), timeout row,
     football possession icon
   - Right: quarter/clock + down&distance + field position info row, simulated
@@ -23,16 +28,39 @@ from typing import Dict, Any, Optional, List, Tuple
 import logging
 import os
 from pathlib import Path
-from datetime import datetime, timedelta, timezone
-from zoneinfo import ZoneInfo
-import requests
+from datetime import datetime
 
+import requests
 from PIL import Image, ImageDraw, ImageFont
 
-from src.plugin_system.base_plugin import BasePlugin
-from src.base_classes.football import Football, FootballLive
-from src.base_classes.sports import SportsRecent, SportsUpcoming
-from src.logging_config import get_logger
+# The core's shared sports base classes (src.base_classes.football/sports)
+# were removed entirely when LEDMatrix deprecated built-in managers in
+# favor of fully standalone plugins -- confirmed via the real
+# "No module named 'src.base_classes.football'" error on real hardware,
+# and via the current LEDMatrix README ("Built-in Managers Deprecated...
+# moved to the plugin system"). This plugin no longer depends on them at
+# all; every sport plugin (including the official football-scoreboard and
+# baseball, confirmed via baseball's own current source) now implements
+# its own complete ESPN fetch/extraction, mirroring baseball's approach.
+#
+# BasePlugin itself is NOT deprecated -- it's the one still-valid core
+# interface every plugin implements, confirmed directly from baseball's
+# own current source ("on real deployments the import above succeeds").
+# Guarded the same way baseball does: the fallback below exists ONLY for
+# sandbox testing without the real LEDMatrix framework installed.
+try:
+    from src.plugin_system.base_plugin import BasePlugin
+except ImportError:
+    class BasePlugin:  # type: ignore
+        """Local fallback ONLY for sandbox testing when the real
+        LEDMatrix framework isn't installed -- on real deployments the
+        import above succeeds and this class is never used."""
+        def __init__(self, plugin_id, config, display_manager, cache_manager, plugin_manager):
+            self.plugin_id = plugin_id
+            self.config = config
+            self.display_manager = display_manager
+            self.cache_manager = cache_manager
+            self.plugin_manager = plugin_manager
 
 # --- Font engine (ported verbatim from ledmatrix-tidbyt-baseball) ---------
 # Rather than hardcoding a guessed filename, this scans a bundled fonts/
@@ -157,9 +185,6 @@ class BDFFont:
             cursor_x += g.get("dwidth", 4)
 
 
-logger = get_logger(__name__)
-
-
 # --- Shared bitmap font (3 wide x 5 tall) --------------------------------
 # Same font used for team abbreviations, the info row, and (in compact form)
 # the yard number on the field.
@@ -236,234 +261,20 @@ GOALPOST_YELLOW = (255, 205, 40)
 FIELD_GREEN = (30, 110, 60)
 
 
-class _ExtractionMixin:
-    """
-    Shared _extract_game_details() override -- adds yard line, possession
-    text, and real team colors on top of whatever Football's own extraction
-    provides. Used by all three worker types (Live/Recent/Upcoming) so the
-    extra fields are available regardless of game state.
-    """
-
-    def _extract_game_details(self, game_event: Dict) -> Optional[Dict]:
-        details = super()._extract_game_details(game_event)
-        if details is None:
-            return None
-        try:
-            situation = game_event["competitions"][0].get("situation") or {}
-            # ESPN gives yardLine as 0-100 from the *possessing* team's own goal
-            # line, plus a human string like "TEX 35". Grab both -- we compute
-            # our own absolute field position from yardLine + possession side.
-            details["yard_line"] = situation.get("yardLine")
-            details["possession_text"] = situation.get("possessionText", "")
-            details["is_redzone"] = situation.get("isRedZone", False)
-        except Exception:
-            details["yard_line"] = None
-            details["possession_text"] = ""
-
-        try:
-            competitors = game_event["competitions"][0]["competitors"]
-            home_team = next(c for c in competitors if c.get("homeAway") == "home")
-            away_team = next(c for c in competitors if c.get("homeAway") == "away")
-            # ESPN's team object carries real hex team colors (verified against
-            # a live boxscore response, e.g. "color": "061642", "alternateColor":
-            # "bc945c") -- use `color` as primary, falling back to
-            # `alternateColor` if the primary is missing or pure white/black
-            # (some teams' primary color is white, which reads poorly as a
-            # solid end zone fill on a black-background LED display).
-            details["home_color"] = _hex_to_rgb(
-                home_team["team"].get("color"), home_team["team"].get("alternateColor")
-            )
-            details["away_color"] = _hex_to_rgb(
-                away_team["team"].get("color"), away_team["team"].get("alternateColor")
-            )
-
-            # Quarter-by-quarter scores -- football's equivalent of baseball's
-            # per-inning linescores, used by the ported box-score grid on the
-            # final-game layout. ESPN's `linescores` is a documented field
-            # (same convention across sports: a list of {"value": N} per
-            # period), unconfirmed specifically for football the way it was
-            # for baseball, so treat a missing/malformed array as "no data"
-            # (blank cells) rather than guessing zeros.
-            def parse_linescores(team):
-                raw = team.get("linescores")
-                if not isinstance(raw, list):
-                    return []
-                out = []
-                for entry in raw:
-                    try:
-                        out.append(int(entry.get("value")))
-                    except (AttributeError, TypeError, ValueError):
-                        out.append(None)
-                return out
-
-            details["home_linescores"] = parse_linescores(home_team)
-            details["away_linescores"] = parse_linescores(away_team)
-        except Exception:
-            details["home_color"] = (60, 60, 60)
-            details["away_color"] = (60, 60, 60)
-            details["home_linescores"] = []
-            details["away_linescores"] = []
-
-        try:
-            # ESPN's scoreboard-level `leaders` (confirmed to exist per
-            # competition, with passing/rushing/receiving categories each
-            # naming one athlete + a team reference) -- combined across
-            # BOTH teams (one top passer/rusher/receiver for the whole game,
-            # not per team), so which team each one belongs to has to be
-            # checked via the `team` reference rather than assumed.
-            #
-            # NOT YET VERIFIED: the exact contents of `displayValue` (e.g.
-            # whether it includes completions/attempts and TDs, or just
-            # yards) -- extracting it verbatim rather than assuming a
-            # specific format, so double check this against a real
-            # finished game before trusting the on-screen wording.
-            raw_leaders = game_event["competitions"][0].get("leaders", [])
-            leaders = []
-            for category in raw_leaders:
-                for leader in category.get("leaders", []):
-                    athlete = leader.get("athlete", {})
-                    team_ref = leader.get("team", {})
-                    leaders.append({
-                        "category": category.get("name", ""),
-                        "team_id": team_ref.get("id") if isinstance(team_ref, dict) else None,
-                        "name": athlete.get("shortName") or athlete.get("displayName", ""),
-                        "display_value": leader.get("displayValue", ""),
-                    })
-            details["leaders"] = leaders
-        except Exception:
-            details["leaders"] = []
-
-        # Tag which league this game came from, so the plugin can tell games
-        # from different workers apart once they're merged into one list.
-        details["league"] = self.league
-        return details
-
-
-class _LiveDataWorker(_ExtractionMixin, FootballLive):
-    """
-    One instance per configured league, for currently-in-progress games.
-
-    IMPORTANT FINDING: _fetch_data() is *never* implemented anywhere in this
-    core repo -- not for football, not for baseball, hockey, or basketball
-    either (checked all of them). SportsLive.update() calls self._fetch_data()
-    expecting a dict with an "events" key, but the only definition anywhere
-    is SportsCore's abstract `pass`. So without this override, live_games
-    would silently stay empty forever, fetch failures and all -- there'd be
-    no error, just nothing ever showing up. This isn't football-specific;
-    it'd need adding for any sport built on this core.
-    """
-
-    def _fetch_data(self) -> Optional[Dict]:
-        # NOT calling self._fetch_todays_games() directly -- confirmed it
-        # has the EXACT same silent-swallowing problem _fetch_schedule()
-        # had (see _fetch_schedule_direct() below): it catches
-        # requests.exceptions.RequestException internally and returns None
-        # instead of re-raising, which would make a real HTTP error (like
-        # the 403 confirmed on real hardware for the recent/upcoming path)
-        # invisible to this plugin's own diagnostic logging the same way.
-        # This replicates its request logic directly so real errors
-        # propagate as exceptions instead.
-        #
-        # Uses the standard library's zoneinfo instead of pytz (which
-        # _fetch_todays_games() itself uses) -- an earlier version of this
-        # plugin imported pytz at module level, and it turned out to not
-        # be installed in the actual plugin environment, which crashed
-        # loading this ENTIRE module before any of our own logging could
-        # even run -- explaining a "doesn't even try to initialize"
-        # symptom with literally no error surfaced anywhere. zoneinfo is
-        # part of Python 3.9+ itself, so this removes an external
-        # dependency this plugin doesn't actually need to introduce.
-        tz = ZoneInfo("America/New_York")
-        now = datetime.now(tz)
-        yesterday = now - timedelta(days=1)
-        url = f"https://site.api.espn.com/apis/site/v2/sports/{self.sport}/{self.league}/scoreboard"
-        response = self.session.get(
-            url,
-            # limit dropped from 1000 to 100 -- see _fetch_schedule_direct's
-            # docstring for why (100 is still far more than one day's worth
-            # of games, so this doesn't risk missing anything real).
-            params={"dates": f"{yesterday.strftime('%Y%m%d')}-{now.strftime('%Y%m%d')}", "limit": 100},
-            headers=self.headers,
-            timeout=10,
-        )
-        response.raise_for_status()  # raises on 4xx/5xx, unlike _fetch_todays_games which swallows this
-        return {"events": response.json().get("events", [])}
-
-
-def _fetch_schedule_direct(worker, start, end) -> List[Dict]:
-    """
-    Bypasses ESPNDataSource.fetch_schedule() and makes the request directly.
-
-    Why: that method catches ALL exceptions internally (including HTTP
-    errors like a 403) and just returns an empty list -- it never re-raises.
-    That's what made a real 403 Forbidden (confirmed on real hardware,
-    2026-08-06, during a genuinely live game) invisible to this plugin's own
-    error handling: our update() only ever saw "0 games found," identical
-    to what a genuinely empty schedule looks like, because the core method
-    swallowed the actual error before we ever got a chance to see it. This
-    duplicates just enough of fetch_schedule's request logic to let a real
-    HTTP error propagate as an exception.
-
-    NOTE: two header strategies (custom app name, then full browser
-    mimicking) have BOTH still gotten a real 403 on real hardware, so the
-    header theory alone is looking insufficient. `limit=1000` and, in the
-    recent/upcoming callers below, a 21/14-day date range are not
-    request shapes a real browser would ever construct (browsing espn.com
-    never asks for three weeks of scoreboard data in one call) -- that
-    parameter shape alone is plausible grounds for rejection independent
-    of headers. Narrowed both `limit` (1000 -> 100) and the callers' date
-    ranges as another attempt. NOT YET CONFIRMED -- same fundamental
-    limitation as the header fixes: no way to test ESPN's real rejection
-    behavior from this sandbox.
-    """
-    url = f"{worker.data_source.base_url}/{worker.sport}/{worker.league}/scoreboard"
-    params = {
-        "dates": f"{start.strftime('%Y%m%d')}-{end.strftime('%Y%m%d')}",
-        "limit": 100,
-    }
-    response = worker.data_source.session.get(
-        url, headers=worker.data_source.get_headers(), params=params, timeout=15
-    )
-    response.raise_for_status()  # raises on 4xx/5xx, unlike fetch_schedule which swallows this
-    return response.json().get("events", [])
-
-
-class _RecentDataWorker(_ExtractionMixin, Football, SportsRecent):
-    """
-    One instance per configured league, for completed (final) games.
-
-    Composed the same way baseball.py composes BaseballRecent(Baseball,
-    SportsRecent) -- football.py just never got the equivalent class, so we
-    build it here instead of in core.
-    """
-
-    def _fetch_data(self) -> Optional[Dict]:
-        # Narrowed from 21 days to 7: SportsRecent.update() itself filters
-        # to a 21-day-back cutoff, but a request for the last 7 days still
-        # catches essentially any real "recent" game while looking far
-        # less like scraper traffic than a 3-week request. If this turns
-        # out to lose games that are genuinely 8-21 days old, that's a
-        # real trade-off to revisit -- for now, prioritizing getting ANY
-        # data through over the full window.
-        now = datetime.now(timezone.utc)
-        start = now - timedelta(days=7)
-        events = _fetch_schedule_direct(self, start, now)
-        return {"events": events}
-
-
-class _UpcomingDataWorker(_ExtractionMixin, Football, SportsUpcoming):
-    """
-    One instance per configured league, for scheduled-but-not-started games.
-    Same story as _RecentDataWorker -- composed here since football.py has
-    no equivalent to baseball's pattern.
-    """
-
-    def _fetch_data(self) -> Optional[Dict]:
-        # Narrowed from 14 days to 7, same reasoning as _RecentDataWorker.
-        now = datetime.now(timezone.utc)
-        end = now + timedelta(days=7)
-        events = _fetch_schedule_direct(self, now, end)
-        return {"events": events}
+# NOTE: the old core-inherited "_LiveDataWorker"/"_RecentDataWorker"/
+# "_UpcomingDataWorker" classes (one per league, each delegating to a core
+# Football/FootballLive/SportsRecent/SportsUpcoming base class) are gone.
+# Those core classes no longer exist -- confirmed via the real
+# "No module named 'src.base_classes.football'" error on real hardware,
+# and via LEDMatrix's own current README ("Built-in Managers Deprecated").
+# This plugin is now a single, fully standalone class (mirroring baseball's
+# own current, real-hardware-confirmed-working architecture): one shared
+# requests.Session(), its own complete ESPN fetch + extraction logic below
+# (as methods on NFLCollegeScoreboardPlugin itself), looping over whichever
+# leagues are configured rather than owning a separate worker instance per
+# league. All of the actual DRAWING code below this point (display(),
+# _draw_scorebug_layout(), etc.) is untouched -- it only ever consumed a
+# plain game dict, never anything from the removed core classes directly.
 
 
 def _hex_to_rgb(primary: Optional[str], fallback: Optional[str]) -> tuple:
@@ -497,157 +308,96 @@ class NFLCollegeScoreboardPlugin(BasePlugin):
     """
     Standalone football scoreboard plugin with a fully custom layout.
 
-    Owns one _LeagueDataWorker per configured league (see config's
-    `leagues` list) for data/fetch state, and implements its own
-    _draw_scorebug_layout() -- the exact pixel design worked out earlier --
-    for whichever game gets selected across all of them.
+    Fully self-contained (mirroring baseball's own current, real-hardware-
+    confirmed-working architecture) -- one shared requests.Session(), its
+    own complete ESPN fetch + extraction logic, looping over whichever
+    leagues are configured. No dependency on any core sports base class;
+    those were removed from LEDMatrix entirely (see the imports comment
+    at the top of this file for how that was confirmed).
+
+    Implements its own _draw_scorebug_layout() -- the exact pixel design
+    worked out earlier in this project -- for whichever game gets
+    selected across all configured leagues/states.
     """
 
-    # ESPN's URL slug for a league (used to build the scoreboard/summary
-    # fetch URL) is NOT the same string the core project uses internally for
-    # logo directories and per-sport config keys (verified against
-    # src/logo_downloader.py's LOGO_DIRECTORIES dict and
-    # src/base_classes/sports.py's `mode_config = config.get(f"{sport_key}_scoreboard")`).
-    # This maps the former to the latter.
-    LEAGUE_TO_SPORT_KEY = {
-        "nfl": "nfl",
-        "college-football": "ncaa_fb",
-    }
-
-    # A realistic browser User-Agent, not a custom app-identifying string.
-    # UPDATED after real-world evidence: the baseball plugin's original fix
-    # (a distinct app name like "LEDMatrix-TidbytBaseball/1.0") was applied
-    # here first as "LEDMatrix-NFLCollegeScoreboard/1.0", but a real 403
-    # Forbidden from ESPN was confirmed on real hardware with that fix
-    # already deployed (2026-08-06, during the actual live Hall of Fame
-    # Game) -- so a custom app-identifying UA is NOT sufficient on its own.
-    # Switched to mimicking an actual browser instead, on the theory that a
-    # distinctive app-name string may be MORE conspicuous to bot detection
-    # than a generic one, not less. This is a genuine guess, not confirmed
-    # to fix the 403 -- needs verification against a real game.
-    _USER_AGENT = (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-    )
+    # A realistic, full browser header set -- NOT just a User-Agent string.
+    # Real history behind this: a custom app-identifying UA
+    # ("LEDMatrix-NFLCollegeScoreboard/1.0") was deployed and confirmed
+    # STILL got a real 403 Forbidden on real hardware during a genuinely
+    # live game (2026-08-06, Hall of Fame Game). Re-checking baseball's own
+    # CURRENT source (it hit the identical 403 around the same date) shows
+    # its proven fix goes further than anything tried here: a full
+    # browser-like header set including Accept/Accept-Language/
+    # Accept-Encoding/Referer/Origin/Connection AND the three Sec-Fetch-*
+    # headers, which hadn't been tried in this plugin before. Baseball is
+    # confirmed fetching successfully on the same Pi/IP right now with
+    # this exact set, which is the strongest evidence available for any
+    # header configuration tried so far -- adopted verbatim rather than
+    # partially, since baseball's own comments note even a complete
+    # standard-browser UA ALONE was insufficient (a common bot-detection
+    # pattern checks for the other headers a real browser always sends
+    # alongside it, not just User-Agent in isolation).
+    #
+    # Still not verifiable from this sandbox (no outbound network access
+    # here) -- if this ALSO doesn't resolve it on real hardware, that
+    # would point toward something header-independent (IP-based rate
+    # limiting, TLS fingerprinting, or a more fundamental block), which
+    # no header change could fix.
     _BROWSER_HEADERS = {
-        "User-Agent": _USER_AGENT,
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+        ),
         "Accept": "application/json, text/plain, */*",
         "Accept-Language": "en-US,en;q=0.9",
-        "Referer": "https://www.espn.com/",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Referer": "https://www.espn.com/nfl/scoreboard",
         "Origin": "https://www.espn.com",
+        "Connection": "keep-alive",
+        "Sec-Fetch-Dest": "empty",
+        "Sec-Fetch-Mode": "cors",
+        "Sec-Fetch-Site": "same-site",
     }
-
-    def _apply_user_agent_fix(self, worker) -> None:
-        """
-        Same underlying problem the baseball plugin hit: ESPN rejecting
-        requests. The core project's default headers are generic,
-        unfilled-placeholder values shared verbatim across every LEDMatrix
-        install -- `SportsCore.__init__` sets `self.headers['User-Agent']`
-        to `'LEDMatrix/1.0 (https://github.com/yourusername/LEDMatrix;
-        contact@example.com)'` (literally never filled in), and
-        `ESPNDataSource.get_headers()` separately returns a different
-        generic `'LEDMatrix/1.0'`. These are two SEPARATE header paths --
-        `_fetch_todays_games()` (live) uses `self.headers`, while
-        `fetch_schedule()` (recent/upcoming) goes through
-        `self.data_source.get_headers()` -- so both need overriding, not
-        just one, or only some of our fetches would get the fix.
-
-        NOT YET CONFIRMED WORKING: a first attempt at this fix (a custom
-        app-identifying User-Agent) was deployed to real hardware and
-        still got a real 403 Forbidden from ESPN during a genuinely live
-        game. This version tries mimicking a real browser's full header
-        set instead -- needs the same real-hardware verification before
-        trusting it either.
-        """
-        if hasattr(worker, "headers"):
-            worker.headers = dict(worker.headers)
-            worker.headers.update(self._BROWSER_HEADERS)
-        if hasattr(worker, "data_source") and worker.data_source is not None:
-            worker.data_source.get_headers = lambda: dict(self._BROWSER_HEADERS)
 
     def __init__(self, plugin_id: str, config: Dict[str, Any],
                  display_manager: Any, cache_manager: Any, plugin_manager: Any):
         super().__init__(plugin_id, config, display_manager, cache_manager, plugin_manager)
+        self.logger = logging.getLogger(f"plugin.{plugin_id}")
 
-        leagues = config.get("leagues") or ["nfl"]
-        self.live_workers: Dict[str, _LiveDataWorker] = {}
-        self.recent_workers: Dict[str, _RecentDataWorker] = {}
-        self.upcoming_workers: Dict[str, _UpcomingDataWorker] = {}
+        self.leagues: List[str] = config.get("leagues") or ["nfl"]
+        # ESPN's own URL slug for a league IS the config value already
+        # ("nfl", "college-football") -- no separate mapping needed now
+        # that we build the fetch URL ourselves instead of going through
+        # a core class that expected a different internal "sport_key".
 
-        for league in leagues:
-            sport_key = self.LEAGUE_TO_SPORT_KEY.get(league)
-            if sport_key is None:
-                self.logger.warning("Unknown league '%s' in config, skipping", league)
-                continue
+        # ONE shared session for everything (both leagues, all three
+        # states) -- mirrors baseball's own architecture exactly. Real
+        # finding from this project: the previous per-league-per-state
+        # worker design created up to 6 separate requests.Session()
+        # objects firing requests within the same update() cycle, a real
+        # architectural difference from baseball (single session) that
+        # was never ruled out as a contributing factor to the 403s hit
+        # here. A single shared session is both simpler and closer to the
+        # one plugin confirmed still working against ESPN right now.
+        self.session = requests.Session()
+        self.session.headers.update(self._BROWSER_HEADERS)
 
-            # ONE shared session per league, used by all three workers
-            # (live/recent/upcoming) instead of each constructing its own.
-            # Real finding: baseball's plugin (which works fine, confirmed
-            # on the same Pi/IP at the same time our football requests were
-            # getting 403'd) uses a single requests.Session() for
-            # everything. Our workers were each independently creating TWO
-            # separate sessions apiece (one via SportsCore.__init__'s
-            # self.session, another via Football.__init__'s
-            # self.data_source.session) -- up to 6 separate sessions per
-            # league firing requests within the same update() cycle. That's
-            # a real, confirmed architectural difference from the plugin
-            # that's actually working; consolidating to one shared session
-            # is a genuine attempt at closing that gap, not just another
-            # header guess.
-            shared_session = requests.Session()
-
-            worker_config = self._build_worker_config(sport_key)
-            for worker_dict, worker_cls, label in (
-                (self.live_workers, _LiveDataWorker, "live"),
-                (self.recent_workers, _RecentDataWorker, "recent"),
-                (self.upcoming_workers, _UpcomingDataWorker, "upcoming"),
-            ):
-                try:
-                    worker = worker_cls(
-                        worker_config, display_manager, cache_manager, self.logger, sport_key=sport_key
-                    )
-                except Exception as e:
-                    # If this is silently failing on real hardware, it would
-                    # explain "only test mode works" perfectly: __init__
-                    # would still complete overall (this loop just skips the
-                    # broken worker type), so the plugin loads fine and test
-                    # mode (which never touches these workers) works, but
-                    # this league/state combination would have no worker to
-                    # call in update() at all -- not caught there, since
-                    # there'd be nothing in the dict to iterate over and log
-                    # a failure for. Logging it here specifically so a
-                    # construction failure is visible instead of silently
-                    # invisible.
-                    self.logger.error(
-                        f"WORKER CONSTRUCTION FAILED for {label}/{league} "
-                        f"(sport_key={sport_key}): {type(e).__name__}: {e}",
-                        exc_info=True,
-                    )
-                    continue
-                # Football.__init__ sets self.sport = "football" but never sets
-                # self.league -- and SportsCore's fetch methods build the actual
-                # ESPN URL as f".../sports/{self.sport}/{self.league}/...", so
-                # without this the URL would be missing its league segment
-                # entirely (".../sports/football//scoreboard").
-                worker.league = league
-                self._apply_user_agent_fix(worker)
-                # Replace both of this worker's independently-created
-                # sessions with the one shared session for this league.
-                worker.session = shared_session
-                if hasattr(worker, "data_source") and worker.data_source is not None:
-                    worker.data_source.session = shared_session
-                worker_dict[league] = worker
-
-        self.logger.info(
-            f"Plugin initialized: live_workers={list(self.live_workers.keys())}, "
-            f"recent_workers={list(self.recent_workers.keys())}, "
-            f"upcoming_workers={list(self.upcoming_workers.keys())}. If any of these "
-            f"lists are empty but you configured that league, check the logs above "
-            f"for a WORKER CONSTRUCTION FAILED line."
-        )
-
+        self.live_games: List[Dict[str, Any]] = []
+        self.recent_games: List[Dict[str, Any]] = []
+        self.upcoming_games: List[Dict[str, Any]] = []
         self.current_game: Optional[Dict] = None
         self.current_state: Optional[str] = None  # "live" | "recent" | "upcoming"
+
+        # In-memory logo cache, keyed by "{league}_{abbr}_{size}" -- avoids
+        # re-opening/re-thumbnailing the same file every display() call.
+        # Local-file resolution + ESPN download-and-cache-to-disk happens
+        # once per game in _resolve_logo() during fetch, not here; this
+        # cache is just for the decoded/resized PIL.Image itself.
+        self._logo_cache: Dict[str, Any] = {}
+        # Where downloaded (non-bundled) logos get cached to disk between
+        # polls, keyed the same way -- avoids re-downloading from ESPN
+        # every single update() cycle for teams with no local asset.
+        self._logo_disk_cache_dir = os.path.join(PLUGIN_DIR, "logo_cache")
 
         # --- Font engine state (ported from baseball plugin) ---
         # Used only by _render_final_game()/_render_upcoming_game() -- the
@@ -863,37 +613,6 @@ class NFLCollegeScoreboardPlugin(BasePlugin):
         ty = bar_y0 + max((bar_h - line_h) // 2, 0) - line_bbox[1]
         self._render_text(image, (tx, ty), text_line, font, text_color)
 
-    def _build_worker_config(self, sport_key: str) -> Dict[str, Any]:
-        """
-        Translate our config schema (leagues/favorite_teams/live.*/upcoming.*/
-        recent.*/show_records/etc.) into the shape SportsCore/FootballLive
-        expects: everything namespaced under f"{sport_key}_scoreboard", with
-        its own specific key names (live_update_interval, live_game_duration,
-        recent_update_interval, upcoming_update_interval, ...).
-        """
-        cfg = self.config
-        live_cfg = cfg.get("live", {})
-        upcoming_cfg = cfg.get("upcoming", {})
-        recent_cfg = cfg.get("recent", {})
-
-        mode_config = {
-            "enabled": cfg.get("enabled", True),
-            "favorite_teams": cfg.get("favorite_teams", []),
-            "show_favorite_teams_only": cfg.get("show_favorite_teams_only", False),
-            "show_all_live": live_cfg.get("show_all_live", True),
-            "live_update_interval": live_cfg.get("update_interval_seconds", 15),
-            "live_game_duration": live_cfg.get("game_duration_seconds", 20),
-            "upcoming_update_interval": upcoming_cfg.get("update_interval_seconds", 3600),
-            "upcoming_games_to_show": upcoming_cfg.get("games_to_show", 10),
-            "recent_update_interval": recent_cfg.get("update_interval_seconds", 3600),
-            "recent_games_to_show": recent_cfg.get("games_to_show", 5),
-            "show_records": cfg.get("show_records", False),
-            "show_ranking": cfg.get("show_ranking", False),
-            "show_odds": cfg.get("show_odds", False),
-            "test_mode": cfg.get("test_mode", False),
-        }
-        return {f"{sport_key}_scoreboard": mode_config}
-
     @staticmethod
     def _favorite_first(games: List[Dict], favorite_teams: List[str]) -> List[Dict]:
         if not favorite_teams:
@@ -979,115 +698,373 @@ class NFLCollegeScoreboardPlugin(BasePlugin):
         else:
             self.current_game, self.current_state = self._TEST_LIVE_GAME, "live"
 
+    def _fetch_league_scoreboard(self, league: str) -> List[Dict]:
+        """
+        Fetches ESPN's scoreboard endpoint ONCE for this league -- covers
+        live, today's completed, and today's not-yet-started games all in
+        a single call. Mirrors baseball's own current, real-hardware-
+        confirmed-working approach (one fetch per poll) rather than this
+        plugin's previous design (a separate fetch per state per league --
+        up to 6 requests per update() cycle across 2 leagues x 3 states).
+        Deliberately reducing request volume/shape is a real, distinct
+        change from the header changes above -- neither alone has been
+        confirmed to resolve the 403s investigated in this project, so
+        both are worth having in place.
+
+        Raises on a real HTTP error (401/403 included) rather than
+        swallowing it, unlike the core-provided fetch methods this plugin
+        used to depend on (confirmed via a real 403 that went completely
+        invisible to this plugin's own error handling until that was
+        fixed) -- the caller's try/except is what actually logs this.
+        """
+        url = f"https://site.api.espn.com/apis/site/v2/sports/football/{league}/scoreboard"
+        resp = self.session.get(url, timeout=10)
+        if resp.status_code in (401, 403):
+            self.logger.error(
+                f"ESPN scoreboard fetch for {league} got HTTP {resp.status_code} -- "
+                f"likely blocked/rate-limited at the request level, not a data problem. "
+                f"Current User-Agent: {self.session.headers.get('User-Agent')!r}."
+            )
+        resp.raise_for_status()
+        return resp.json().get("events", [])
+
+    def _format_game_datetime(self, event: Dict[str, Any]) -> Tuple[Optional[str], Optional[str]]:
+        """Same approach as baseball's own _format_game_datetime (confirmed
+        working on real hardware): parses ESPN's event.date (ISO8601 UTC,
+        e.g. "2026-08-07T00:00Z") and formats as separate (date, time)
+        strings in the system's local timezone -- assumes the Pi's system
+        clock/timezone is set correctly, the normal case for a home
+        device. Returns (None, None) if missing/unparseable rather than
+        crashing."""
+        raw = event.get("date")
+        if not raw:
+            return None, None
+        try:
+            iso = raw.replace("Z", "+00:00")
+            dt_utc = datetime.fromisoformat(iso)
+            dt_local = dt_utc.astimezone()
+            date_str = f"{dt_local.month}/{dt_local.day}"
+            hour_12 = dt_local.hour % 12 or 12
+            ampm = "AM" if dt_local.hour < 12 else "PM"
+            time_str = f"{hour_12}:{dt_local.minute:02d} {ampm}"
+            return date_str, time_str
+        except Exception:
+            return None, None
+
+    def _parse_game_event(self, event: Dict[str, Any], league: str) -> Optional[Dict[str, Any]]:
+        """
+        Builds our complete game dict directly from one raw ESPN scoreboard
+        event -- standalone, no core Football/SportsCore class to delegate
+        the "common" fields to anymore. Mirrors baseball's own _parse_game
+        (confirmed working, from its current real-hardware source) for the
+        general shape, adapted for football's own fields (yard line,
+        possession, down/distance, quarter/clock, timeouts) in place of
+        baseball's (balls/strikes/outs, bases, inning).
+        """
+        try:
+            competitions = event.get("competitions", [])
+            if not competitions:
+                return None
+            comp = competitions[0]
+            competitors = comp.get("competitors", [])
+            if len(competitors) < 2:
+                return None
+            away = next((c for c in competitors if c.get("homeAway") == "away"), competitors[0])
+            home = next((c for c in competitors if c.get("homeAway") == "home"), competitors[-1])
+
+            status = comp.get("status", {}) or {}
+            status_type = status.get("type", {}) or {}
+            situation = comp.get("situation", {}) or {}
+            state = status_type.get("state", "pre")  # "pre" | "in" | "post"
+
+            def team_abbr(competitor):
+                return competitor.get("team", {}).get("abbreviation", "")[:3].upper()
+
+            def team_record(competitor):
+                """NOT fully confirmed against real captured data (same
+                caveat baseball's own equivalent extraction carries) --
+                ESPN's competitor.records array structure is documented
+                by the community but not the exact sub-field names. Tries
+                plausible combinations; returns None rather than guessing
+                wrong if nothing usable is found."""
+                try:
+                    records = competitor.get("records", [])
+                    if not records:
+                        return None
+                    overall = next(
+                        (r for r in records
+                         if str(r.get("type", r.get("name", ""))).lower() in ("total", "overall")),
+                        records[0],
+                    )
+                    return overall.get("summary") or overall.get("displayValue")
+                except Exception:
+                    return None
+
+            def team_logo_url(competitor):
+                team = competitor.get("team", {})
+                if team.get("logo"):
+                    return team["logo"]
+                logos = team.get("logos") or []
+                if logos:
+                    return logos[0].get("href")
+                return None
+
+            def parse_linescores(competitor):
+                raw = competitor.get("linescores")
+                if not isinstance(raw, list):
+                    return []
+                out = []
+                for entry in raw:
+                    try:
+                        out.append(int(entry.get("value")))
+                    except (AttributeError, TypeError, ValueError):
+                        out.append(None)
+                return out
+
+            game_date_str, game_time_str = self._format_game_datetime(event)
+            away_id = away.get("team", {}).get("id")
+            home_id = home.get("team", {}).get("id")
+
+            details = {
+                "league": league,
+                "event_id": event.get("id"),
+                "state": state,
+                "away_id": away_id,
+                "home_id": home_id,
+                "away_abbr": team_abbr(away),
+                "home_abbr": team_abbr(home),
+                "away_score": int(away.get("score", 0) or 0),
+                "home_score": int(home.get("score", 0) or 0),
+                "away_record": team_record(away),
+                "home_record": team_record(home),
+                "away_color": _hex_to_rgb(away.get("team", {}).get("color"), away.get("team", {}).get("alternateColor")),
+                "home_color": _hex_to_rgb(home.get("team", {}).get("color"), home.get("team", {}).get("alternateColor")),
+                "away_logo_url": team_logo_url(away),
+                "home_logo_url": team_logo_url(home),
+                "away_logo_path": None,   # filled in below by _resolve_logo()
+                "home_logo_path": None,
+                "game_date": game_date_str,
+                "game_time": game_time_str,
+                "period": status.get("period", 0),
+                "period_text": f"Q{status.get('period')}" if status.get("period") else "",
+                "clock": status.get("displayClock", ""),
+                "home_linescores": parse_linescores(home),
+                "away_linescores": parse_linescores(away),
+            }
+
+            # Live-specific fields -- only meaningful (and only reliably
+            # present) while the game is actually in progress.
+            details["yard_line"] = situation.get("yardLine")
+            details["possession_text"] = situation.get("possessionText", "")
+            details["is_redzone"] = situation.get("isRedZone", False)
+            possession_team_id = situation.get("possession")
+            if possession_team_id == home_id:
+                details["possession_indicator"] = "home"
+            elif possession_team_id == away_id:
+                details["possession_indicator"] = "away"
+            else:
+                details["possession_indicator"] = None
+
+            # NOT CONFIRMED against real captured live data (unlike most
+            # other fields here) -- trying the most likely field names,
+            # same "extract what's there, don't guess wrong" approach as
+            # baseball's own unconfirmed fields.
+            details["down_distance_text"] = (
+                situation.get("shortDownDistanceText")
+                or situation.get("downDistanceText")
+                or ""
+            )
+
+            # NOT CONFIRMED against real captured data -- ESPN's
+            # lightweight scoreboard response may not include timeouts
+            # remaining at all (baseball's own extraction notes several
+            # fields, like hits/errors, that simply aren't present at this
+            # endpoint and need the detailed summary endpoint instead).
+            # Defaulting to 3 (a full allotment) rather than 0, so an
+            # unpopulated value doesn't misleadingly render as "all
+            # timeouts used."
+            details["away_timeouts"] = away.get("timeouts", 3)
+            details["home_timeouts"] = home.get("timeouts", 3)
+
+            # ESPN's scoreboard-level `leaders` -- combined across BOTH
+            # teams (one top passer/rusher/receiver for the whole game,
+            # not per team), so which team each belongs to is checked via
+            # the `team` reference. NOT YET VERIFIED: the exact contents
+            # of `displayValue` (whether it includes completions/attempts
+            # and TDs, or just yards) -- extracted verbatim rather than
+            # assuming a specific format.
+            try:
+                raw_leaders = comp.get("leaders", [])
+                leaders = []
+                for category in raw_leaders:
+                    for leader in category.get("leaders", []):
+                        athlete = leader.get("athlete", {})
+                        team_ref = leader.get("team", {})
+                        leaders.append({
+                            "category": category.get("name", ""),
+                            "team_id": team_ref.get("id") if isinstance(team_ref, dict) else None,
+                            "name": athlete.get("shortName") or athlete.get("displayName", ""),
+                            "display_value": leader.get("displayValue", ""),
+                        })
+                details["leaders"] = leaders
+            except Exception:
+                details["leaders"] = []
+
+            self._resolve_logo(details, "away")
+            self._resolve_logo(details, "home")
+            return details
+        except Exception as e:
+            self.logger.debug(f"Failed to parse game event: {e}", exc_info=True)
+            return None
+
+    # Best-guess local-asset folder per league -- NOT confirmed for
+    # college-football specifically (only "nfl_logos" was directly
+    # confirmed present on real hardware, via this project's test-mode
+    # work). A wrong guess here just means a slower first load for that
+    # league (falls through to downloading from ESPN and caching that
+    # instead), not a broken one.
+    _LOGO_DIR_BY_LEAGUE = {
+        "nfl": "assets/sports/nfl_logos",
+        "college-football": "assets/sports/ncaa_logos",
+    }
+
+    def _resolve_logo(self, game: Dict[str, Any], side: str) -> None:
+        """
+        Fills in game["{side}_logo_path"] with a local file path --
+        either a bundled core asset, or an ESPN-downloaded file cached to
+        disk on first use. Mirrors baseball's own _resolve_logos/
+        _get_team_logo/_load_local_logo pattern (confirmed working on
+        real hardware): try a local asset first, fall back to downloading
+        via the shared session, cache whichever is found so later polls
+        for the same team don't repeat the work.
+        """
+        abbr = game.get(f"{side}_abbr", "")
+        league = game.get("league", "nfl")
+        url = game.get(f"{side}_logo_url")
+
+        logo_dir = self._LOGO_DIR_BY_LEAGUE.get(league, "assets/sports/nfl_logos")
+        for name in (f"{abbr}.png", f"{abbr.lower()}.png", f"{abbr}.PNG"):
+            path = os.path.join(logo_dir, name)
+            if os.path.isfile(path):
+                game[f"{side}_logo_path"] = path
+                return
+
+        if not url:
+            return
+
+        os.makedirs(self._logo_disk_cache_dir, exist_ok=True)
+        cache_path = os.path.join(self._logo_disk_cache_dir, f"{league}_{abbr}.png")
+        if os.path.isfile(cache_path):
+            game[f"{side}_logo_path"] = cache_path
+            return
+
+        try:
+            resp = self.session.get(url, timeout=8)
+            resp.raise_for_status()
+            with open(cache_path, "wb") as f:
+                f.write(resp.content)
+            game[f"{side}_logo_path"] = cache_path
+        except Exception as e:
+            self.logger.debug(f"Could not download logo for {abbr}: {e}")
+
     def update(self) -> None:
         test_cfg = self.config.get("test_mode", {})
         if test_cfg.get("enabled", False):
             self._update_test_mode(test_cfg.get("view", "live"))
             return
 
-        # Diagnostic logging, same purpose as the baseball plugin's: if
-        # nothing ever displays in real (non-test) mode, these logs are
-        # what tells us whether update() is even being called on schedule,
-        # whether the fetch itself is failing, or whether it's succeeding
-        # but genuinely finding zero games. Without this, "nothing shows
-        # up" could mean any of several different problems that all need
-        # different fixes.
-        self.logger.debug(
-            f"update() called: leagues={list(self.live_workers.keys())}, "
-            f"live_enabled={self.config.get('live', {}).get('enabled', True)}, "
-            f"recent_enabled={self.config.get('recent', {}).get('enabled', True)}, "
-            f"upcoming_enabled={self.config.get('upcoming', {}).get('enabled', True)}"
-        )
-
         favorite_teams = self.config.get("favorite_teams", [])
         live_cfg = self.config.get("live", {})
         recent_cfg = self.config.get("recent", {})
         upcoming_cfg = self.config.get("upcoming", {})
 
+        self.logger.debug(f"update() called: leagues={self.leagues}")
+
+        all_live: List[Dict] = []
+        all_recent: List[Dict] = []
+        all_upcoming: List[Dict] = []
+
+        for league in self.leagues:
+            try:
+                events = self._fetch_league_scoreboard(league)
+            except Exception as e:
+                self.logger.error(f"FETCH FAILED for {league}: {type(e).__name__}: {e}", exc_info=True)
+                continue
+
+            live_count = recent_count = upcoming_count = 0
+            for event in events:
+                competitions = event.get("competitions", [])
+                if not competitions:
+                    continue
+                state = competitions[0].get("status", {}).get("type", {}).get("state")
+                if state == "in":
+                    game = self._parse_game_event(event, league)
+                    if game:
+                        all_live.append(game)
+                        live_count += 1
+                elif state == "post" and recent_cfg.get("enabled", True):
+                    game = self._parse_game_event(event, league)
+                    if game:
+                        all_recent.append(game)
+                        recent_count += 1
+                elif state == "pre" and upcoming_cfg.get("enabled", True):
+                    game = self._parse_game_event(event, league)
+                    if game:
+                        all_upcoming.append(game)
+                        upcoming_count += 1
+
+            self.logger.info(
+                f"Fetched {league} OK: {live_count} live, {recent_count} recent, "
+                f"{upcoming_count} upcoming"
+            )
+
+        self.live_games, self.recent_games, self.upcoming_games = all_live, all_recent, all_upcoming
+
         # Priority: live > recent > upcoming -- a live game is always more
-        # interesting than a completed or not-yet-started one. Within each
-        # state, favorite teams are moved to the front.
+        # interesting than a completed or not-yet-started one. Within
+        # each state, favorite teams are moved to the front.
         #
-        # TODO: this shows only the single top-priority game in each state;
-        # rotating through *all* live games (or all recent/upcoming ones)
-        # over their configured game_duration_seconds is still a stub.
+        # TODO: this shows only the single top-priority game in each
+        # state; rotating through *all* live games (or all recent/
+        # upcoming ones) over their configured game_duration_seconds is
+        # still a stub.
+        if live_cfg.get("enabled", True) and all_live:
+            if live_cfg.get("live_priority", True):
+                all_live = self._favorite_first(all_live, favorite_teams)
+            self.current_game = all_live[0]
+            self.current_state = "live"
+            self.logger.info(
+                f"Showing LIVE: {self.current_game.get('away_abbr')}@"
+                f"{self.current_game.get('home_abbr')}"
+            )
+            return
 
-        if live_cfg.get("enabled", True):
-            all_live: List[Dict] = []
-            for league, worker in self.live_workers.items():
-                try:
-                    worker.update()
-                except Exception as e:
-                    self.logger.error(
-                        f"FETCH FAILED for live/{league}: {type(e).__name__}: {e}", exc_info=True
-                    )
-                    continue
-                games = getattr(worker, "live_games", None) or []
-                self.logger.info(f"Fetched live/{league} OK: {len(games)} live game(s)")
-                all_live.extend(games)
-            if all_live:
-                if live_cfg.get("live_priority", True):
-                    all_live = self._favorite_first(all_live, favorite_teams)
-                self.current_game = all_live[0]
-                self.current_state = "live"
-                self.logger.info(
-                    f"Showing LIVE: {self.current_game.get('away_abbr')}@"
-                    f"{self.current_game.get('home_abbr')}"
-                )
-                return
+        if recent_cfg.get("enabled", True) and all_recent:
+            all_recent = self._favorite_first(all_recent, favorite_teams)
+            self.current_game = all_recent[0]
+            self.current_state = "recent"
+            self.logger.info(
+                f"Showing RECENT: {self.current_game.get('away_abbr')}@"
+                f"{self.current_game.get('home_abbr')}"
+            )
+            return
 
-        if recent_cfg.get("enabled", True):
-            all_recent: List[Dict] = []
-            for league, worker in self.recent_workers.items():
-                try:
-                    worker.update()
-                except Exception as e:
-                    self.logger.error(
-                        f"FETCH FAILED for recent/{league}: {type(e).__name__}: {e}", exc_info=True
-                    )
-                    continue
-                games = getattr(worker, "games_list", None) or []
-                self.logger.info(f"Fetched recent/{league} OK: {len(games)} recent game(s)")
-                all_recent.extend(games)
-            if all_recent:
-                all_recent = self._favorite_first(all_recent, favorite_teams)
-                self.current_game = all_recent[0]
-                self.current_state = "recent"
-                self.logger.info(
-                    f"Showing RECENT: {self.current_game.get('away_abbr')}@"
-                    f"{self.current_game.get('home_abbr')}"
-                )
-                return
-
-        if upcoming_cfg.get("enabled", True):
-            all_upcoming: List[Dict] = []
-            for league, worker in self.upcoming_workers.items():
-                try:
-                    worker.update()
-                except Exception as e:
-                    self.logger.error(
-                        f"FETCH FAILED for upcoming/{league}: {type(e).__name__}: {e}", exc_info=True
-                    )
-                    continue
-                games = getattr(worker, "games_list", None) or []
-                self.logger.info(f"Fetched upcoming/{league} OK: {len(games)} upcoming game(s)")
-                all_upcoming.extend(games)
-            if all_upcoming:
-                all_upcoming = self._favorite_first(all_upcoming, favorite_teams)
-                self.current_game = all_upcoming[0]
-                self.current_state = "upcoming"
-                self.logger.info(
-                    f"Showing UPCOMING: {self.current_game.get('away_abbr')}@"
-                    f"{self.current_game.get('home_abbr')}"
-                )
-                return
+        if upcoming_cfg.get("enabled", True) and all_upcoming:
+            all_upcoming = self._favorite_first(all_upcoming, favorite_teams)
+            self.current_game = all_upcoming[0]
+            self.current_state = "upcoming"
+            self.logger.info(
+                f"Showing UPCOMING: {self.current_game.get('away_abbr')}@"
+                f"{self.current_game.get('home_abbr')}"
+            )
+            return
 
         self.logger.warning(
             "No games found across live/recent/upcoming for any configured league -- "
             "current_game will be None and display() will show nothing. If fetches "
-            "above show 0 games rather than FETCH FAILED, the fetch itself is working "
-            "but genuinely found nothing (check date range/season/leagues config); if "
-            "you see FETCH FAILED, that's the actual problem to chase."
+            "above show 0/0/0 rather than FETCH FAILED, the fetch itself is working "
+            "but genuinely found nothing (check leagues config/season); if you see "
+            "FETCH FAILED, that's the actual problem to chase."
         )
         self.current_game = None
         self.current_state = None
@@ -1156,23 +1133,27 @@ class NFLCollegeScoreboardPlugin(BasePlugin):
             },
         ]
 
-    def _logo_loader_for_league(self, league: Optional[str]):
+    def _load_and_resize_logo(self, team_id, abbr, logo_path, logo_url, size: int = 96):
         """
-        Returns whichever worker instance for this league actually has
-        _load_and_resize_logo() (inherited from SportsCore) -- our top-level
-        plugin doesn't inherit it directly since the multi-league refactor
-        made the plugin OWN workers rather than BE one. Without this, logo
-        loading would silently fail (caught by the try/except around every
-        call site) and fall back to flat color swatches -- which is exactly
-        what happened until this was added; confirmed by re-rendering
-        before/after and seeing the placeholder circle logos disappear/
-        reappear.
+        Opens an already-resolved local logo file and thumbnails it.
+        Replaces the old core-delegated version (which went through a
+        per-league "worker" instance inheriting _load_and_resize_logo()
+        from SportsCore) -- logo resolution (local asset vs. downloading
+        from ESPN) now happens ONCE during fetch/extraction, in
+        _resolve_logo(), so by the time rendering calls this, logo_path
+        is already a valid local file or None. `team_id`/`logo_url` are
+        accepted but unused -- kept so call sites didn't all need
+        updating for a narrower signature.
         """
-        for workers in (self.live_workers, self.recent_workers, self.upcoming_workers):
-            worker = workers.get(league)
-            if worker is not None:
-                return worker
-        return None
+        if not logo_path:
+            return None
+        try:
+            img = Image.open(logo_path).convert("RGBA")
+            img.thumbnail((size, size), Image.Resampling.LANCZOS)
+            return img
+        except Exception as e:
+            self.logger.debug(f"Could not open logo file {logo_path} for {abbr}: {e}")
+            return None
 
     # -- Recent (final score) layout ----------------------------------------
 
@@ -1208,7 +1189,7 @@ class NFLCollegeScoreboardPlugin(BasePlugin):
         NOT YET VERIFIED: the exact wording/format of each stat line
         depends on ESPN's `leaders[].leaders[].displayValue`, which hasn't
         been checked against a real finished game -- see the extraction
-        comment in _ExtractionMixin.
+        comment in _parse_game_event.
         """
         try:
             width = self.display_manager.width
@@ -1233,11 +1214,8 @@ class NFLCollegeScoreboardPlugin(BasePlugin):
             def load_logo(team):
                 if team.get("logo_path") is None:
                     return None
-                loader = self._logo_loader_for_league(team.get("league"))
-                if loader is None:
-                    return None
                 try:
-                    return loader._load_and_resize_logo(
+                    return self._load_and_resize_logo(
                         team["team_id"], team["abbr"], team["logo_path"], team.get("logo_url")
                     )
                 except Exception as e:
@@ -1470,21 +1448,17 @@ class NFLCollegeScoreboardPlugin(BasePlugin):
             self.logger.error(f"Error drawing upcoming-game layout: {e}", exc_info=True)
 
     def _safe_load_logo(self, game: Dict, side: str):
-        """Best-effort logo load for the ported layouts, using the same
-        SportsCore._load_and_resize_logo() pipeline the team stack uses.
-        Delegates to whichever league worker actually has that method --
-        see _logo_loader_for_league()."""
+        """Best-effort logo load for the ported layouts -- logo_path is
+        already resolved (local asset or ESPN download) by _resolve_logo()
+        during fetch, so this just opens and thumbnails it."""
         team_id = game.get(f"{side}_id")
         abbr = game.get(f"{side}_abbr", "")
         logo_path = game.get(f"{side}_logo_path")
         logo_url = game.get(f"{side}_logo_url")
         if logo_path is None:
             return None
-        loader = self._logo_loader_for_league(game.get("league"))
-        if loader is None:
-            return None
         try:
-            return loader._load_and_resize_logo(team_id, abbr, logo_path, logo_url)
+            return self._load_and_resize_logo(team_id, abbr, logo_path, logo_url)
         except Exception as e:
             self.logger.debug(f"Logo load failed for {abbr}: {e}")
             return None
@@ -1537,14 +1511,12 @@ class NFLCollegeScoreboardPlugin(BasePlugin):
 
             logo = None
             if team.get("logo_path") is not None:
-                loader = self._logo_loader_for_league(team.get("league"))
-                if loader is not None:
-                    try:
-                        logo = loader._load_and_resize_logo(
-                            team["team_id"], team["abbr"], team["logo_path"], team.get("logo_url")
-                        )
-                    except Exception as e:
-                        self.logger.debug(f"Logo load failed for {team['abbr']}: {e}")
+                try:
+                    logo = self._load_and_resize_logo(
+                        team["team_id"], team["abbr"], team["logo_path"], team.get("logo_url")
+                    )
+                except Exception as e:
+                    self.logger.debug(f"Logo load failed for {team['abbr']}: {e}")
 
             if logo is not None:
                 # _load_and_resize_logo thumbnails to up to 1.5x display size,

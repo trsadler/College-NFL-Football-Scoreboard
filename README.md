@@ -2,11 +2,31 @@
 
 Custom NFL/NCAA football scoreboard plugin for LEDMatrix. Standalone plugin,
 not a fork of the official `football-scoreboard` registry plugin -- built
-from scratch to replace its layout while reusing the core project's ESPN
-data-fetching. Includes past scores and upcoming games in addition to live
-game tracking.
+from scratch with its own layout AND (as of a later architecture rewrite,
+see the numbered item near the end of "Known gaps" below) its own complete
+ESPN fetch/extraction. Includes past scores and upcoming games in addition
+to live game tracking.
 
-## What's reused vs. custom
+## Architecture
+
+Fully standalone -- one shared `requests.Session()`, its own complete ESPN
+fetch and extraction logic (`_fetch_league_scoreboard`/`_parse_game_event`/
+`_resolve_logo` in `manager.py`), no dependency on any core sports base
+class. This mirrors the `ledmatrix-tidbyt-baseball` plugin's own current
+architecture -- confirmed directly from its real, currently-working source,
+after this plugin's original design (inheriting from
+`src.base_classes.football.Football`/`FootballLive` and
+`src.base_classes.sports.SportsRecent`/`SportsUpcoming`) broke entirely when
+LEDMatrix deprecated those shared "built-in manager" base classes in favor
+of fully standalone plugins. The section below ("What's reused vs. custom")
+and most of the numbered items in "Known gaps" predate that rewrite and
+describe the OLD, now-removed architecture -- kept as a historical record of
+what was tried and why, not as current fact. See the item titled "Complete
+architecture rewrite" near the end of "Known gaps" for what actually
+changed and what's been verified since.
+
+## What's reused vs. custom (describes the ORIGINAL architecture -- see
+## "Architecture" above for what's actually true now)
 
 **Reused from `src.base_classes.football`:**
 - `FootballLive` -- ESPN scoreboard polling, live/upcoming/final state
@@ -23,6 +43,7 @@ game tracking.
   strip (end zones/goal posts/yard lines), and ball-position indicator
   (football icon + arrow + yard number) match the pixel layout mocked up
   during design.
+
 
 ## Known gaps / TODOs before this runs correctly on real games
 
@@ -333,6 +354,129 @@ which fetches straight from ESPN's CDN and caches locally -- that path
 needs real network access to verify, which isn't available in the sandbox
 this was built in, but the code doesn't distinguish test-mode logos from
 real ones; it's the same `logo_path` mechanism either way.
+
+## Complete architecture rewrite (standalone, no core sports base classes)
+
+Everything above this section (except "Architecture" near the top) predates
+this and describes the ORIGINAL design. This section documents what
+actually changed, why, and what's been verified since.
+
+**What broke, and why.** After a real gap in testing (season start), the
+plugin failed to load at all on real hardware: `Unexpected error loading
+plugin nfl-college-scoreboard: No module named 'src.base_classes.football'`.
+Investigation (pulling the current LEDMatrix core repo directly from GitHub)
+confirmed this wasn't a renamed/moved module -- the entire shared "built-in
+manager" architecture (`src.base_classes.football`/`sports`, which
+`FootballLive`/`Football`/`SportsRecent`/`SportsUpcoming` all came from) was
+deprecated and removed from the core project entirely, in favor of every
+sport plugin being fully standalone. Confirmed via the current LEDMatrix
+README itself ("Built-in Managers Deprecated... moved to the plugin
+system") and via a newly-released **official** `football-scoreboard` plugin
+in the `ledmatrix-plugins` registry (version 2.10+, actively maintained,
+far more feature-rich than this plugin -- score/win celebrations, odds
+integration, shared scroll orchestration). Chose to keep building this
+plugin's own custom design rather than switch to the official one, per
+explicit direction, accepting that meant a full rewrite of the data layer
+rather than a patch.
+
+**What `BasePlugin` status turned out to be.** Re-uploading and inspecting
+baseball's CURRENT source (still confirmed working on real hardware)
+showed `from src.plugin_system.base_plugin import BasePlugin` wrapped in a
+`try/except ImportError`, with a local fallback class used "ONLY for
+sandbox testing when the real LEDMatrix framework isn't installed."
+`BasePlugin` itself was never deprecated -- only the sport-specific shared
+base classes were. This plugin now guards that import the same way.
+
+**The rewrite, concretely.** Removed `_ExtractionMixin` and the three
+core-inherited worker classes (`_LiveDataWorker`/`_RecentDataWorker`/
+`_UpcomingDataWorker`, one per league, each delegating to a removed core
+class). Replaced with a single standalone class matching baseball's own
+proven architecture:
+- One shared `requests.Session()` for everything (not up to 6 separate
+  sessions across leagues/states, which the old per-worker design created)
+- `_fetch_league_scoreboard()`: ONE fetch per league per `update()` cycle,
+  covering live/recent/upcoming all at once (ESPN's scoreboard endpoint
+  naturally returns all three states together) -- not a separate fetch per
+  state per league like the old design. Raises on a real HTTP error rather
+  than swallowing it (the old core-provided fetch methods were found to
+  swallow exactly this class of error, making a real 403 invisible to this
+  plugin's own diagnostics).
+- `_parse_game_event()`: builds the complete game dict from raw ESPN JSON
+  from scratch -- team abbreviations, scores, records, colors, logos,
+  quarter/clock, down/distance, possession, yard line, timeouts,
+  linescores, leaders -- mirroring baseball's own `_parse_game` for the
+  general shape and field-confidence caveats, adapted for football-specific
+  fields in place of baseball's (balls/strikes/outs, bases, inning).
+- `_resolve_logo()`: local bundled asset first, then download-and-cache-
+  to-disk from ESPN, mirroring baseball's own `_resolve_logos`/
+  `_get_team_logo`/`_load_local_logo` pattern. Best-guess local-asset
+  folder per league (`assets/sports/nfl_logos` for NFL, confirmed present
+  on real hardware via this project's earlier test-mode work;
+  `assets/sports/ncaa_logos` for college football, NOT confirmed -- a
+  wrong guess here just means a slower first load via the download
+  fallback, not a broken one).
+- The three rendering-code call sites that used to delegate logo loading
+  through a per-league "worker" instance now call
+  `self._load_and_resize_logo()` directly -- logo resolution already
+  happened once during fetch, so rendering just opens the resolved path.
+- Everything from `display()` onward -- every drawing method built across
+  this entire project (the field/yard-line visualization, the recent/
+  upcoming layout redesigns, the ported font engine) -- is completely
+  untouched. None of it ever depended on the removed core classes directly;
+  it only ever consumed a plain game dict.
+- Cleaned up now-dead imports (`timedelta`, `timezone`, `BytesIO`,
+  `zoneinfo` -- the new single-fetch-per-league design doesn't need
+  date-range arithmetic at all, unlike the old per-state-fetch design) and
+  the now-unused `_build_worker_config`/`LEAGUE_TO_SPORT_KEY`/
+  `_apply_user_agent_fix` methods.
+
+**The header set was also upgraded using real evidence, not another
+guess.** Baseball's current source shows it hit the *identical* 403 issue
+around the same date as this plugin's own investigation, and its
+proven-working fix (confirmed: baseball fetches successfully on the same
+Pi/IP where this plugin was getting 403'd) goes further than anything
+tried here previously -- a full realistic browser header set including
+`Accept`/`Accept-Language`/`Accept-Encoding`/`Referer`/`Origin`/
+`Connection` AND the three `Sec-Fetch-*` headers, which had never been
+attempted in this plugin's own prior header-fix attempts. Adopted
+verbatim rather than partially. **Still not verified against ESPN's real
+rejection behavior** -- no outbound network access in the sandbox this
+was built in -- but this is the strongest evidence available for any
+header configuration tried across this whole investigation, since it's
+drawn from a plugin CONFIRMED working right now, not a guess.
+
+**What's been verified, and how (not just "it compiles"):**
+- The plugin imports and constructs successfully with `sys.modules`
+  containing NO stub for `src.base_classes` at all (only `BasePlugin` is
+  stubbed) -- direct proof the removed-class dependency is gone, not an
+  inference from reading the diff.
+- Fed a realistic mocked ESPN scoreboard event (shaped like a real live
+  NFL game JSON) through the actual `update()` method end to end. Every
+  extracted field came out correct: abbreviations, scores, colors
+  (hex-to-RGB), record, down/distance text, possession side, yard line,
+  period/clock, and leaders (filtered to the right team).
+- Fed that same real extracted-shape game dict into `_draw_scorebug_layout`
+  directly -- rendered with no exception.
+- Simulated a 403 through the real `update()` call path -- confirmed it
+  produces both the specific "likely blocked/rate-limited" diagnostic log
+  AND the generic `FETCH FAILED` log, with no unhandled exception, and
+  `current_game`/`current_state` correctly reset to `None`.
+- Re-ran all three test-mode views (live/recent/upcoming) through the
+  actual `update()` + `display()` call path after every change in this
+  rewrite, including after the final import cleanup -- all three still
+  render successfully throughout.
+- Verified `_resolve_logo()` degrades gracefully (no exception, leaves
+  `logo_path` as `None`) when there's no local asset folder and no real
+  network to download from, which is exactly this sandbox's situation --
+  confirms the fallback path doesn't crash even in the worst case.
+
+**Still needs verification on real hardware, which this sandbox cannot
+provide:** whether the expanded header set actually clears ESPN's 403,
+whether `assets/sports/ncaa_logos` is really the correct folder name for
+college football on the real Pi (falls back to downloading if wrong,
+which itself needs real network to verify), and general behavior against
+a real, currently-live or recently-completed game now that the season has
+started.
 
 ## Suggested next steps
 
