@@ -478,6 +478,66 @@ which itself needs real network to verify), and general behavior against
 a real, currently-live or recently-completed game now that the season has
 started.
 
+**UPDATE, confirmed on real hardware:** the rewrite works and the 403 is
+resolved. Real logs from the Pi show `Fetched nfl OK: 0 live, 0 recent,
+16 upcoming` with no errors -- the fetch, the new header set, and the
+extraction logic are all genuinely working against live ESPN data now
+that the season has started.
+
+## Real bug found on real hardware: display() never received which mode
+## the core wanted shown
+
+Real symptom (from the same log confirming the fetch works): the core's
+display controller correctly cycled through all three declared modes
+every ~15s (`Switching to mode: nfl_college_recent`, `..._upcoming`,
+`..._live`, repeating) -- but this plugin's own diagnostic logging showed
+`Showing UPCOMING: ATL@GB` every single time, regardless of which mode
+the core had just switched to. The display looked "stuck," but the real
+cause had nothing to do with fetching (which was working the whole
+time) -- `display()` had no way to know which mode was active.
+
+**Root cause, confirmed from real LEDMatrix core source/PRs (not
+inferred):** `display_controller.py` inspects a plugin's `display()`
+signature and only passes a `display_mode` keyword (the specific mode
+string, e.g. `"nfl_college_recent"`) if that method actually accepts it;
+otherwise it silently falls back to calling `display(force_clear=True)`
+with no mode information at all. Our previous signature
+(`display(self, force_clear=False)`) didn't accept it, so every mode
+switch fell through to that same no-mode call, and we always rendered
+whatever our own global live>recent>upcoming priority logic had picked
+-- completely ignoring which of the three modes the core was actually
+asking for. Also confirmed (from a real bug report against other official
+plugins): `display()` should return `True`/`False`, not `None` -- the
+controller skips a mode immediately when `False` is returned, so a mode
+with no current content (e.g. "live" when nothing's live) doesn't show a
+blank or stale panel.
+
+**Fix:** `display()` now accepts `display_mode: Optional[str] = None`.
+When provided, it's mapped (via `_MODE_TO_STATE`) to the matching game
+list (`live_games`/`recent_games`/`upcoming_games`) and draw method,
+favorite-team-sorted, and rendered -- returning `True` if that mode had a
+game to show, `False` if not (letting the core skip straight to the next
+mode). When `display_mode` isn't passed at all (test mode's own call
+path, which has no notion of "which mode is active" since it's always
+previewing one fixed sample), the old global-priority behavior
+(`current_game`/`current_state`) is used unchanged.
+
+**Verified, not just written:**
+- `inspect.signature(...).parameters` confirms `display_mode` is now a
+  real parameter the core's own introspection check will detect.
+- Reproduced the exact real-world scenario from the log (only upcoming
+  games populated, nothing live/recent) and simulated the core cycling
+  through all three modes: `nfl_college_live` and `nfl_college_recent`
+  now correctly return `False`, `nfl_college_upcoming` returns `True` --
+  the core would now correctly skip straight to showing the upcoming
+  game instead of displaying it under all three mode labels.
+- Verified all three modes independently when each has its own real data
+  populated (not just the single-mode-populated case above).
+- Verified an unknown/unrecognized mode string returns `False` gracefully
+  (logged, no exception) rather than crashing.
+- Re-ran the full test-mode regression (all three views via the legacy
+  no-`display_mode` path) after this change -- still renders correctly.
+
 ## Suggested next steps
 
 1. ~~Verify yard-line math~~ done above.

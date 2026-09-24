@@ -1069,15 +1069,72 @@ class NFLCollegeScoreboardPlugin(BasePlugin):
         self.current_game = None
         self.current_state = None
 
-    def display(self, force_clear: bool = False) -> None:
+    # Maps our manifest's declared display_modes to which game list and
+    # draw method each one uses.
+    _MODE_TO_STATE = {
+        "nfl_college_live": ("live", "live_games", "_draw_scorebug_layout"),
+        "nfl_college_recent": ("recent", "recent_games", "_draw_recent_layout"),
+        "nfl_college_upcoming": ("upcoming", "upcoming_games", "_draw_upcoming_layout"),
+    }
+
+    def display(self, force_clear: bool = False, display_mode: Optional[str] = None) -> bool:
+        """
+        Real bug found and fixed here: the core's display_controller
+        inspects display()'s signature and only passes `display_mode`
+        (telling the plugin which of its declared display_modes --
+        "nfl_college_live"/"_recent"/"_upcoming" -- to show right now) if
+        the method actually accepts that keyword. Our previous signature
+        (`display(self, force_clear=False)`) didn't, so the core silently
+        fell back to calling us with no mode information at all --
+        confirmed via real logs: the core correctly logged "Switching to
+        mode: nfl_college_recent" etc. every ~15s, but our own diagnostic
+        logging showed "Showing UPCOMING: ATL@GB" every single time
+        regardless, because we were always falling through to our own
+        global current_game/current_state priority selection instead of
+        respecting which mode was actually being asked for. That's why
+        the display looked "stuck" even though fetching worked correctly
+        the whole time (also confirmed in the same logs).
+
+        Test mode and any other caller that doesn't pass display_mode
+        keeps the old global-priority behavior (current_game/
+        current_state, set by _update_test_mode()/update()) -- since test
+        mode has no notion of "which of the three modes is active", it's
+        always just previewing one fixed sample.
+
+        Returns True/False (not None) -- confirmed via real
+        display_controller behavior/bug reports: a plugin returning
+        False for a mode with no content lets the core skip that mode
+        immediately and move to the next one, rather than showing a
+        blank/stale panel for it.
+        """
+        if display_mode is not None:
+            mapping = self._MODE_TO_STATE.get(display_mode)
+            if mapping is None:
+                self.logger.warning(f"Unknown display_mode {display_mode!r}, nothing to show")
+                return False
+            _, games_attr, draw_method_name = mapping
+            games = getattr(self, games_attr, None) or []
+            if not games:
+                return False
+            games = self._favorite_first(games, self.config.get("favorite_teams", []))
+            draw_method = getattr(self, draw_method_name)
+            draw_method(games[0], force_clear=force_clear)
+            return True
+
+        # No display_mode passed (test mode, or a caller not aware of the
+        # per-mode contract) -- fall back to whichever single game our own
+        # global priority selection (live > recent > upcoming) picked.
         if self.current_game is None:
-            return
+            return False
         if self.current_state == "live":
             self._draw_scorebug_layout(self.current_game, force_clear=force_clear)
         elif self.current_state == "recent":
             self._draw_recent_layout(self.current_game, force_clear=force_clear)
         elif self.current_state == "upcoming":
             self._draw_upcoming_layout(self.current_game, force_clear=force_clear)
+        else:
+            return False
+        return True
 
     # -------------------------------------------------------------------
     # Rendering: our own layout, not inherited from anywhere.
