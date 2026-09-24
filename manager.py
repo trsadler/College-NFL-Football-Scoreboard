@@ -26,9 +26,10 @@ API Version: 1.0.0
 
 from typing import Dict, Any, Optional, List, Tuple
 import logging
+import time
 import os
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import requests
 from PIL import Image, ImageDraw, ImageFont
@@ -399,6 +400,13 @@ class NFLCollegeScoreboardPlugin(BasePlugin):
         # every single update() cycle for teams with no local asset.
         self._logo_disk_cache_dir = os.path.join(PLUGIN_DIR, "logo_cache")
 
+        # Cache for _fetch_recent_lookback()'s results, keyed by league --
+        # refreshed on its own slower timer (recent.update_interval_seconds,
+        # default 1hr) rather than every update() cycle, since a completed
+        # game's result doesn't change once final.
+        self._recent_lookback_cache: Dict[str, List[Dict]] = {}
+        self._recent_lookback_last_fetch: Dict[str, float] = {}
+
         # --- Font engine state (ported from baseball plugin) ---
         # Used only by _render_final_game()/_render_upcoming_game() -- the
         # live layout keeps its own hand-rolled bitmap FONT/_draw_char.
@@ -684,11 +692,9 @@ class NFLCollegeScoreboardPlugin(BasePlugin):
         "all" (cycles through all three, switching every display_duration
         seconds using a simple wall-clock modulo -- no extra state needed).
         """
-        import time as _time
-
         if view == "all":
             cycle_len = max(self.config.get("display_duration", 15), 1)
-            index = int(_time.time() // cycle_len) % 3
+            index = int(time.time() // cycle_len) % 3
             view = ["live", "recent", "upcoming"][index]
 
         if view == "recent":
@@ -724,6 +730,39 @@ class NFLCollegeScoreboardPlugin(BasePlugin):
                 f"ESPN scoreboard fetch for {league} got HTTP {resp.status_code} -- "
                 f"likely blocked/rate-limited at the request level, not a data problem. "
                 f"Current User-Agent: {self.session.headers.get('User-Agent')!r}."
+            )
+        resp.raise_for_status()
+        return resp.json().get("events", [])
+
+    def _fetch_recent_lookback(self, league: str, days_back: int = 10) -> List[Dict]:
+        """
+        Separate fetch covering the last `days_back` days, explicitly
+        requested (confirmed against real usage): the main scoreboard
+        call (_fetch_league_scoreboard) only returns the CURRENT NFL
+        week's games (Thursday through Monday), not a rolling window --
+        so a game that finished last week is invisible to it entirely.
+        Mirrors baseball's own `_fetch_past_games_lookback` (confirmed
+        working on real hardware), which exists for exactly this reason:
+        ESPN's default scoreboard call doesn't cover "recent" in the
+        sense a user actually means (last several days), only "this
+        week."
+
+        Called on its own slower timer (see update()), not every single
+        update() cycle -- a completed game's result doesn't change once
+        final, so there's no reason to re-fetch this as often as live
+        data, and every extra fetch is still worth minimizing given this
+        project's own 403 investigation this session (even though the
+        header fix is now confirmed working).
+        """
+        end = datetime.now()
+        start = end - timedelta(days=days_back)
+        url = f"https://site.api.espn.com/apis/site/v2/sports/football/{league}/scoreboard"
+        params = {"dates": f"{start.strftime('%Y%m%d')}-{end.strftime('%Y%m%d')}", "limit": 100}
+        resp = self.session.get(url, params=params, timeout=10)
+        if resp.status_code in (401, 403):
+            self.logger.error(
+                f"ESPN recent-lookback fetch for {league} got HTTP {resp.status_code} -- "
+                f"likely blocked/rate-limited at the request level."
             )
         resp.raise_for_status()
         return resp.json().get("events", [])
@@ -1017,6 +1056,46 @@ class NFLCollegeScoreboardPlugin(BasePlugin):
                 f"Fetched {league} OK: {live_count} live, {recent_count} recent, "
                 f"{upcoming_count} upcoming"
             )
+
+            # Merge in last week's finished games -- the main scoreboard
+            # call above only covers the CURRENT NFL week, so a game that
+            # finished last week would otherwise never appear as "recent"
+            # at all. Refreshed on its own slower timer (not every
+            # update() cycle) since a completed game's result never
+            # changes once final.
+            if recent_cfg.get("enabled", True):
+                lookback_interval = recent_cfg.get("update_interval_seconds", 3600)
+                last_fetch = self._recent_lookback_last_fetch.get(league, 0.0)
+                now = time.time()
+                if now - last_fetch >= lookback_interval or league not in self._recent_lookback_cache:
+                    try:
+                        lookback_events = self._fetch_recent_lookback(league)
+                        lookback_games = []
+                        for event in lookback_events:
+                            competitions = event.get("competitions", [])
+                            if not competitions:
+                                continue
+                            state = competitions[0].get("status", {}).get("type", {}).get("state")
+                            if state != "post":
+                                continue
+                            game = self._parse_game_event(event, league)
+                            if game:
+                                lookback_games.append(game)
+                        self._recent_lookback_cache[league] = lookback_games
+                        self._recent_lookback_last_fetch[league] = now
+                        self.logger.info(f"Recent-lookback for {league} OK: {len(lookback_games)} finished game(s)")
+                    except Exception as e:
+                        self.logger.error(
+                            f"RECENT LOOKBACK FETCH FAILED for {league}: {type(e).__name__}: {e}",
+                            exc_info=True,
+                        )
+                # Merge, deduplicating by event_id against what the main
+                # per-week call already found.
+                seen_ids = {g.get("event_id") for g in all_recent}
+                for g in self._recent_lookback_cache.get(league, []):
+                    if g.get("event_id") not in seen_ids:
+                        all_recent.append(g)
+                        seen_ids.add(g.get("event_id"))
 
         self.live_games, self.recent_games, self.upcoming_games = all_live, all_recent, all_upcoming
 

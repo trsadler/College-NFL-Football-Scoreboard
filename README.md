@@ -538,6 +538,40 @@ previewing one fixed sample), the old global-priority behavior
 - Re-ran the full test-mode regression (all three views via the legacy
   no-`display_mode` path) after this change -- still renders correctly.
 
+## Real gap: "recent" could never show a game from last week
+
+Confirmed via real hardware (and explicit user confirmation of the
+expected behavior): with the `display_mode` fix live, the plugin
+correctly cycled to the upcoming game's mode -- but `recent` stayed
+empty even though a full week's worth of games had already been played
+and finished. Root cause: `_fetch_league_scoreboard()`'s single ESPN
+call only returns the CURRENT NFL week's games (Thursday through
+Monday), not a rolling window -- so a game that finished last week
+never appears in it at all, regardless of how long ago it finished.
+
+**Fix:** added `_fetch_recent_lookback()`, a separate fetch covering the
+last 10 days via ESPN's `dates=` range parameter, mirroring baseball's
+own `_fetch_past_games_lookback` (which exists for this exact reason,
+confirmed from its current real-hardware-working source). Runs on its
+own slower timer (`recent.update_interval_seconds`, default 1 hour) --
+not every `update()` cycle -- since a completed game's result never
+changes once final, unlike live data. Results are merged into
+`recent_games`, deduplicated by `event_id` against whatever the main
+per-week call already found.
+
+**Verified, not just written:**
+- Simulated the main call returning only an upcoming game and the
+  lookback call returning a finished game from a different week --
+  confirmed the finished game correctly appears in `recent_games` and
+  gets selected as `current_state` (recent outranks upcoming in the
+  priority order).
+- Verified the throttle: called `update()` three times in a row and
+  confirmed the main fetch ran all three times (as it should, live data
+  changes) while the lookback fetch ran exactly once (cached for the
+  configured interval).
+- Re-ran the full test-mode regression after this change -- still
+  renders correctly.
+
 ## Suggested next steps
 
 1. ~~Verify yard-line math~~ done above.
