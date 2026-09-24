@@ -572,6 +572,55 @@ per-week call already found.
 - Re-ran the full test-mode regression after this change -- still
   renders correctly.
 
+## Real gap: only ever showed games[0], never rotated
+
+Confirmed via explicit user report: even with 16 upcoming games fetched
+(the full Thu/Sun/Mon week's slate), only ever showed the same single
+game, and it never advanced. `game_duration_seconds` and `games_to_show`
+had been in `config_schema.json` since the beginning (20s/15s defaults,
+10/5 game caps) but were never actually implemented -- `display()`
+always just rendered `games[0]` after favorite-sorting.
+
+**Fix:** added `_pick_rotated_game()`, using the same deterministic
+wall-clock approach already used by `_update_test_mode`'s "all" cycling
+(`int(time.time() // duration) % len(games)`) rather than mutable
+per-mode index state -- whichever game "should" be showing at a given
+moment is computed fresh every call, so it doesn't matter how often or
+irregularly `display()` gets invoked. Also wired up the previously-inert
+`games_to_show` cap (truncates the list before rotating).
+
+**Verified:** simulated `display()` calls at increasing time offsets
+with 3 games and a 15s duration -- confirmed it advances to the next
+game exactly at each 15s boundary and wraps back to the first after
+cycling through all three. Verified `games_to_show=2` against a 16-game
+list stays confined to only the first two, never rotating into the rest.
+Re-ran the full test-mode regression -- still passes.
+
+## Real bug: recent-lookback fetch got a 400, not a 403
+
+Confirmed via real hardware logs, and distinct from every other issue in
+this project: `_fetch_recent_lookback()` (added last session to find
+last week's finished games) failed with `400 Client Error: Bad Request`
+on the `dates=20260914-20260924` (10-day) range -- a different error
+class than the 401/403s investigated everywhere else here. A 400 means
+ESPN considers the request itself malformed, not just unwelcome.
+
+**Fix:** reduced the lookback window from 10 days to 7. Best guess: the
+`dates=` range parameter has a maximum span ESPN accepts, and 10 days
+exceeded it -- this plugin's own pre-rewrite code used this exact
+request shape with a 7-day window and only ever got 403s (a header/
+blocking issue, since fixed), never a 400, so 7 days is a value already
+confirmed not to trigger this specific error class. **Not independently
+verified that 7 is the actual limit** -- same sandbox limitation as
+everywhere else in this project (no outbound network access here).
+
+Also added response-body logging to both scoreboard fetch methods (main
+and lookback) for any non-OK status, not just 401/403 -- ESPN's error
+responses often explain the actual rejection reason, and this project
+has repeatedly needed a full redeploy-and-check-logs round-trip just to
+see status codes with no body. If this happens again, the actual reason
+should be visible in the log line directly.
+
 ## Suggested next steps
 
 1. ~~Verify yard-line math~~ done above.

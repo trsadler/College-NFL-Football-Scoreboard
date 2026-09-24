@@ -725,16 +725,16 @@ class NFLCollegeScoreboardPlugin(BasePlugin):
         """
         url = f"https://site.api.espn.com/apis/site/v2/sports/football/{league}/scoreboard"
         resp = self.session.get(url, timeout=10)
-        if resp.status_code in (401, 403):
+        if not resp.ok:
             self.logger.error(
                 f"ESPN scoreboard fetch for {league} got HTTP {resp.status_code} -- "
-                f"likely blocked/rate-limited at the request level, not a data problem. "
+                f"response body: {resp.text[:500]!r}. "
                 f"Current User-Agent: {self.session.headers.get('User-Agent')!r}."
             )
         resp.raise_for_status()
         return resp.json().get("events", [])
 
-    def _fetch_recent_lookback(self, league: str, days_back: int = 10) -> List[Dict]:
+    def _fetch_recent_lookback(self, league: str, days_back: int = 7) -> List[Dict]:
         """
         Separate fetch covering the last `days_back` days, explicitly
         requested (confirmed against real usage): the main scoreboard
@@ -746,6 +746,22 @@ class NFLCollegeScoreboardPlugin(BasePlugin):
         ESPN's default scoreboard call doesn't cover "recent" in the
         sense a user actually means (last several days), only "this
         week."
+
+        `days_back` reduced from 10 to 7 after a real 400 Bad Request on
+        real hardware with 10 -- a DIFFERENT class of error than the 403s
+        investigated elsewhere in this project (400 means ESPN considers
+        the request itself malformed, not just unwelcome). Best guess:
+        the `dates=` range parameter has a maximum span ESPN will accept,
+        and 10 days exceeded it. 7 days matches this plugin's own
+        pre-rewrite code, which used this exact shape and only ever hit
+        403s (a header/blocking issue, since fixed), never a 400 -- so 7
+        days is a value confirmed not to trigger this specific error
+        class before. NOT independently verified that 7 is itself the
+        real limit (could be less, or something else about the request
+        entirely) -- same sandbox limitation as everywhere else in this
+        project. Logs the response body on any error now (see below),
+        so if this happens again the actual reason is visible immediately
+        instead of needing another guess-and-redeploy round-trip.
 
         Called on its own slower timer (see update()), not every single
         update() cycle -- a completed game's result doesn't change once
@@ -759,10 +775,10 @@ class NFLCollegeScoreboardPlugin(BasePlugin):
         url = f"https://site.api.espn.com/apis/site/v2/sports/football/{league}/scoreboard"
         params = {"dates": f"{start.strftime('%Y%m%d')}-{end.strftime('%Y%m%d')}", "limit": 100}
         resp = self.session.get(url, params=params, timeout=10)
-        if resp.status_code in (401, 403):
+        if not resp.ok:
             self.logger.error(
                 f"ESPN recent-lookback fetch for {league} got HTTP {resp.status_code} -- "
-                f"likely blocked/rate-limited at the request level."
+                f"params={params}, response body: {resp.text[:500]!r}"
             )
         resp.raise_for_status()
         return resp.json().get("events", [])
@@ -1148,13 +1164,37 @@ class NFLCollegeScoreboardPlugin(BasePlugin):
         self.current_game = None
         self.current_state = None
 
-    # Maps our manifest's declared display_modes to which game list and
-    # draw method each one uses.
+    # Maps our manifest's declared display_modes to (config section key,
+    # game-list attribute, draw method).
     _MODE_TO_STATE = {
         "nfl_college_live": ("live", "live_games", "_draw_scorebug_layout"),
         "nfl_college_recent": ("recent", "recent_games", "_draw_recent_layout"),
         "nfl_college_upcoming": ("upcoming", "upcoming_games", "_draw_upcoming_layout"),
     }
+
+    def _pick_rotated_game(self, games: List[Dict], duration_seconds: float) -> Dict:
+        """
+        Real gap found and fixed here: `game_duration_seconds` and
+        `games_to_show` have been in config_schema.json since the
+        beginning (20s/15s defaults, 10/5 game caps) but were never
+        actually implemented -- display() always just rendered games[0],
+        so with e.g. 16 upcoming games fetched, only the single
+        first-sorted one ever showed, and it never advanced. Confirmed by
+        explicit user report: only one upcoming game visible despite a
+        full week's slate being fetched.
+
+        Deterministic wall-clock rotation, not mutable per-mode index
+        state -- same approach already used by _update_test_mode's "all"
+        cycling. Whichever game "should" be showing at this exact moment
+        is computed fresh from time.time() // duration_seconds, so it
+        doesn't matter how often or irregularly display() gets called;
+        every call at a given moment picks the same game, and it
+        naturally advances as time passes.
+        """
+        if len(games) <= 1:
+            return games[0]
+        index = int(time.time() // max(duration_seconds, 1)) % len(games)
+        return games[index]
 
     def display(self, force_clear: bool = False, display_mode: Optional[str] = None) -> bool:
         """
@@ -1191,13 +1231,19 @@ class NFLCollegeScoreboardPlugin(BasePlugin):
             if mapping is None:
                 self.logger.warning(f"Unknown display_mode {display_mode!r}, nothing to show")
                 return False
-            _, games_attr, draw_method_name = mapping
+            section_key, games_attr, draw_method_name = mapping
             games = getattr(self, games_attr, None) or []
             if not games:
                 return False
+            section_cfg = self.config.get(section_key, {})
+            games_to_show = section_cfg.get("games_to_show")
+            if games_to_show:
+                games = games[:games_to_show]
             games = self._favorite_first(games, self.config.get("favorite_teams", []))
+            duration = section_cfg.get("game_duration_seconds", 15)
+            game = self._pick_rotated_game(games, duration)
             draw_method = getattr(self, draw_method_name)
-            draw_method(games[0], force_clear=force_clear)
+            draw_method(game, force_clear=force_clear)
             return True
 
         # No display_mode passed (test mode, or a caller not aware of the
