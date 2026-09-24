@@ -24,7 +24,7 @@ import logging
 import os
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
-import pytz
+from zoneinfo import ZoneInfo
 import requests
 
 from PIL import Image, ImageDraw, ImageFont
@@ -363,7 +363,17 @@ class _LiveDataWorker(_ExtractionMixin, FootballLive):
         # invisible to this plugin's own diagnostic logging the same way.
         # This replicates its request logic directly so real errors
         # propagate as exceptions instead.
-        tz = pytz.timezone("America/New_York")
+        #
+        # Uses the standard library's zoneinfo instead of pytz (which
+        # _fetch_todays_games() itself uses) -- an earlier version of this
+        # plugin imported pytz at module level, and it turned out to not
+        # be installed in the actual plugin environment, which crashed
+        # loading this ENTIRE module before any of our own logging could
+        # even run -- explaining a "doesn't even try to initialize"
+        # symptom with literally no error surfaced anywhere. zoneinfo is
+        # part of Python 3.9+ itself, so this removes an external
+        # dependency this plugin doesn't actually need to introduce.
+        tz = ZoneInfo("America/New_York")
         now = datetime.now(tz)
         yesterday = now - timedelta(days=1)
         url = f"https://site.api.espn.com/apis/site/v2/sports/{self.sport}/{self.league}/scoreboard"

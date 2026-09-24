@@ -274,6 +274,32 @@ game tracking.
     grounded in a real, confirmed difference from a working plugin rather
     than a guess at header/parameter values, but it still needs testing
     against the real ESPN rejection before trusting it.
+22. **Found and fixed a severe regression from item 17's own fix**: after
+    a real gap in testing (season start), the plugin stopped initializing
+    ENTIRELY on real hardware -- not "test mode works, real modes don't"
+    like before, but no log output at all, not even an attempt to start.
+    Root cause: item 17 added `import pytz` at module level to replicate
+    `_fetch_todays_games()`'s timezone handling, and `pytz` was never
+    confirmed to actually be installed in the real plugin environment --
+    only assumed safe because the CORE project's `requirements.txt` lists
+    it. That assumption was wrong to rely on: a plugin's own
+    `requirements.txt` doesn't necessarily get (re-)installed on an
+    update to an already-installed plugin, only possibly on a fresh
+    install. A failing top-level import crashes loading the entire
+    module before any of this plugin's own logging can run at all --
+    which explains total silence far better than any error message
+    would. Replaced `pytz.timezone("America/New_York")` with the
+    standard library's `zoneinfo.ZoneInfo("America/New_York")` (built
+    into Python 3.9+, no pip install ever needed) and removed `pytz`
+    from `requirements.txt` entirely. Verified `zoneinfo` resolves the
+    same timezone correctly (EDT, -04:00) as a direct sanity check, not
+    just that the file compiles. Audited every other module-level import
+    and top-level statement in the file for the same risk -- everything
+    else is either standard library, a dependency (`requests`/`Pillow`)
+    the core project itself requires for anything to run at all (so its
+    absence would break baseball too, which is known-working), or a
+    plain string/dict/list literal with no I/O. This was the only
+    self-introduced risk of this kind in the file.
 
 ## Test mode
 
