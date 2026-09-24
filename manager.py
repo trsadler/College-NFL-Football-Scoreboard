@@ -736,52 +736,68 @@ class NFLCollegeScoreboardPlugin(BasePlugin):
 
     def _fetch_recent_lookback(self, league: str, days_back: int = 7) -> List[Dict]:
         """
-        Separate fetch covering the last `days_back` days, explicitly
-        requested (confirmed against real usage): the main scoreboard
-        call (_fetch_league_scoreboard) only returns the CURRENT NFL
-        week's games (Thursday through Monday), not a rolling window --
-        so a game that finished last week is invisible to it entirely.
-        Mirrors baseball's own `_fetch_past_games_lookback` (confirmed
-        working on real hardware), which exists for exactly this reason:
-        ESPN's default scoreboard call doesn't cover "recent" in the
-        sense a user actually means (last several days), only "this
-        week."
+        Separate fetch covering the last `days_back` days, day by day --
+        explicitly requested (confirmed against real usage): the main
+        scoreboard call (_fetch_league_scoreboard) only returns the
+        CURRENT NFL week's games (Thursday through Monday), not a rolling
+        window -- so a game that finished last week is invisible to it
+        entirely.
 
-        `days_back` reduced from 10 to 7 after a real 400 Bad Request on
-        real hardware with 10 -- a DIFFERENT class of error than the 403s
-        investigated elsewhere in this project (400 means ESPN considers
-        the request itself malformed, not just unwelcome). Best guess:
-        the `dates=` range parameter has a maximum span ESPN will accept,
-        and 10 days exceeded it. 7 days matches this plugin's own
-        pre-rewrite code, which used this exact shape and only ever hit
-        403s (a header/blocking issue, since fixed), never a 400 -- so 7
-        days is a value confirmed not to trigger this specific error
-        class before. NOT independently verified that 7 is itself the
-        real limit (could be less, or something else about the request
-        entirely) -- same sandbox limitation as everywhere else in this
-        project. Logs the response body on any error now (see below),
-        so if this happens again the actual reason is visible immediately
-        instead of needing another guess-and-redeploy round-trip.
+        REAL BUG FOUND AND FIXED HERE: this originally used a single
+        hyphenated date-RANGE query (`dates=20260917-20260924`), which
+        got a confirmed real 400 Bad Request on real hardware --
+        `{"code":400,"message":"Failed to get events endpoint."}` --
+        even after narrowing the range from 10 to 7 days (ruling out
+        "range too long" as the cause). Re-checked baseball's own current,
+        real-hardware-confirmed-working `_fetch_past_games_lookback` and
+        found a genuine difference: it NEVER uses a hyphenated range at
+        all -- it loops over each individual day with its OWN single-date
+        query (`dates=20260917`, `dates=20260918`, etc.), one request per
+        day. Switched to that exact approach. Plausible explanation for
+        why the range format seemed to "work" (got a 403, not a 400) in
+        this plugin's very first, pre-full-rewrite version: that 403 was
+        very likely a bot-blocking layer rejecting the request based on
+        headers alone, before it ever reached whatever backend logic
+        would have validated the date parameter's syntax -- so the range
+        format was never actually confirmed valid, just rejected earlier
+        in the pipeline for an unrelated reason. Only once the header fix
+        got requests past that layer did the real validation error
+        underneath become visible.
+
+        More requests than the single range-query approach (one per day
+        instead of one for the whole window), but baseball does exactly
+        this on the same real Pi/IP and is confirmed working, so this
+        isn't a re-introduction of the request-volume concern from
+        earlier in this project -- it's the proven-correct shape for this
+        specific kind of query, which is different from the main
+        per-league scoreboard call.
 
         Called on its own slower timer (see update()), not every single
         update() cycle -- a completed game's result doesn't change once
         final, so there's no reason to re-fetch this as often as live
-        data, and every extra fetch is still worth minimizing given this
-        project's own 403 investigation this session (even though the
-        header fix is now confirmed working).
+        data.
         """
-        end = datetime.now()
-        start = end - timedelta(days=days_back)
         url = f"https://site.api.espn.com/apis/site/v2/sports/football/{league}/scoreboard"
-        params = {"dates": f"{start.strftime('%Y%m%d')}-{end.strftime('%Y%m%d')}", "limit": 100}
-        resp = self.session.get(url, params=params, timeout=10)
-        if not resp.ok:
-            self.logger.error(
-                f"ESPN recent-lookback fetch for {league} got HTTP {resp.status_code} -- "
-                f"params={params}, response body: {resp.text[:500]!r}"
-            )
-        resp.raise_for_status()
-        return resp.json().get("events", [])
+        today = datetime.now()
+        events: List[Dict] = []
+        for offset in range(1, days_back + 1):
+            day = today - timedelta(days=offset)
+            date_param = day.strftime("%Y%m%d")
+            try:
+                resp = self.session.get(url, params={"dates": date_param}, timeout=10)
+                if not resp.ok:
+                    self.logger.error(
+                        f"ESPN recent-lookback fetch for {league}/{date_param} got HTTP "
+                        f"{resp.status_code} -- response body: {resp.text[:500]!r}"
+                    )
+                resp.raise_for_status()
+                events.extend(resp.json().get("events", []))
+            except Exception as e:
+                # One bad day shouldn't sink the whole lookback -- log and
+                # keep going, same as baseball's own equivalent loop.
+                self.logger.warning(f"Could not fetch recent-lookback for {league}/{date_param}: {e}")
+                continue
+        return events
 
     def _format_game_datetime(self, event: Dict[str, Any]) -> Tuple[Optional[str], Optional[str]]:
         """Same approach as baseball's own _format_game_datetime (confirmed

@@ -621,6 +621,54 @@ has repeatedly needed a full redeploy-and-check-logs round-trip just to
 see status codes with no body. If this happens again, the actual reason
 should be visible in the log line directly.
 
+## The 400 was NOT a range-length issue -- it was the wrong query shape entirely
+
+The previous fix (reducing the lookback window from 10 to 7 days) was
+tested on real hardware and **confirmed wrong**: the exact same `400
+Client Error: Bad Request`, with ESPN's own error body
+(`{"code":400,"message":"Failed to get events endpoint."}`), came back
+for the 7-day range too. Narrowing the range wasn't the fix.
+
+**Real root cause, found by re-diffing against baseball's actual current
+source:** this plugin's `_fetch_recent_lookback()` used a single
+hyphenated date-RANGE query (`dates=20260917-20260924`). Baseball's own
+`_fetch_past_games_lookback` -- confirmed working on the same real
+Pi/IP right now -- **never does this**. It loops over each individual
+day and queries ESPN with a single date each time (`dates=20260917`,
+then `dates=20260918`, etc., one request per day, no hyphen at all).
+The range-query format is apparently just not valid input for this
+endpoint.
+
+This also retroactively explains something that looked like evidence
+for the wrong theory earlier: this plugin's very first, pre-full-rewrite
+version used this same range-query shape and got a 403, not a 400 --
+which looked like proof the format was valid syntax, just rejected for
+an unrelated (header/bot-detection) reason. In hindsight, that 403 was
+most likely a blocking layer rejecting the request based on headers
+alone, before it ever reached whatever backend logic validates the date
+parameter -- so the range format was never actually confirmed valid,
+just rejected earlier in the pipeline for a completely different
+reason. Only after the header fix got requests past that layer did the
+real validation error underneath become visible for the first time.
+
+**Fix:** switched to baseball's exact proven shape -- loop over each of
+the last 7 days, one single-date query per day, collecting and merging
+results. More requests than the single range-query attempt, but
+baseball does exactly this against the same real ESPN endpoint from the
+same Pi/IP and is confirmed working, so this isn't a re-introduction of
+the request-volume concern investigated earlier in this project -- it's
+simply the correct request shape for this kind of query, distinct from
+the main per-league scoreboard call (which takes no date parameter at
+all and was never affected by this).
+
+**Verified:** confirmed the new implementation issues exactly 7 separate
+single-date requests with no hyphens, correctly finds a game on the one
+simulated day that has one, and skips the rest without error. Ran the
+full `update()` pipeline end to end with this fix in place -- a
+last-week finished game correctly appears in `recent_games` and gets
+selected over an available upcoming game, matching the intended
+priority order. Re-ran the full test-mode regression -- still passes.
+
 ## Suggested next steps
 
 1. ~~Verify yard-line math~~ done above.
