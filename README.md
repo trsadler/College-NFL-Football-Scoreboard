@@ -669,6 +669,31 @@ last-week finished game correctly appears in `recent_games` and gets
 selected over an available upcoming game, matching the intended
 priority order. Re-ran the full test-mode regression -- still passes.
 
+## Real bug: yellow win-highlight box looked incomplete only when the winner was on the left
+
+Confirmed via a real screenshot: the away-side (left) yellow box looked
+like it wasn't filling its space, while the home-side (right) one looked
+fine, despite both being coded as the exact same 13px width. Root cause:
+both boxes were trimmed from their own right edge, but the away zone's
+adjacent stroke (toward FINAL) is on ITS right, while the home zone's
+adjacent stroke is on ITS left. The same "trim from the right" rule
+therefore put the away box's gap right next to the FINAL stroke -- the
+most visually prominent spot, dead center of the display -- while the
+home box's gap landed on the far side near the logo block, barely
+noticeable, purely as a coincidence of which side of the screen each
+zone happens to sit on.
+
+**Fix:** trim the away box from its LEFT edge instead (now `x34-46`
+rather than `x32-44`), so it stays flush against its own adjacent stroke
+exactly like the home side already does against its. Same width, same
+concept, just mirrored to match which side each zone's stroke is
+actually on.
+
+**Verified:** rendered both a winner-on-left and a winner-on-right game
+and confirmed via direct pixel inspection that both yellow boxes now
+extend all the way to the edge nearest FINAL (x46 and x81 respectively).
+Re-ran the full test-mode regression -- still passes.
+
 ## Suggested next steps
 
 1. ~~Verify yard-line math~~ done above.

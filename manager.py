@@ -1453,9 +1453,25 @@ class NFLCollegeScoreboardPlugin(BasePlugin):
             # (toward FINAL) below, and this zone absorbs the freed column.
             score_x0 = centered_x(away_team["score"], 32, 15) - 1  # 1px left, per request
             if away_won:
-                # Yellow box trimmed 1px off its right edge -- doesn't span
-                # the full zone width anymore, per request.
-                draw.rectangle([32, 0, 44, TOP_H - 1], fill=YELLOW)
+                # Real bug found and fixed here: this box's trim was cut
+                # from its RIGHT edge (x32-44 of the full x32-46 zone),
+                # which put the empty gap immediately next to the stroke
+                # separating this zone from FINAL -- the most visually
+                # prominent spot, since it's right at the center of the
+                # display. The home side's equivalent box (below) trims
+                # from ITS right edge too, but its zone's adjacent stroke
+                # is on the LEFT, so that same rule put its gap on the far
+                # side (near the logo block, barely noticeable) purely by
+                # coincidence of which side of the display each zone sits
+                # on. Confirmed via a real screenshot: winner-on-left
+                # reads as "not filling the space" while winner-on-right
+                # looks fine, despite both boxes being identically sized.
+                # Fixed by trimming from the LEFT edge instead (x34-46),
+                # so this box now stays flush against its own adjacent
+                # stroke (x47) exactly like the home side does against
+                # its own (x80), and the gap moves to the far side (near
+                # the logo block) where it's equally unnoticeable.
+                draw.rectangle([34, 0, 46, TOP_H - 1], fill=YELLOW)
                 score_color = BLACK
             else:
                 score_color = WHITE
