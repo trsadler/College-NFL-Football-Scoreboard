@@ -694,6 +694,100 @@ and confirmed via direct pixel inspection that both yellow boxes now
 extend all the way to the edge nearest FINAL (x46 and x81 respectively).
 Re-ran the full test-mode regression -- still passes.
 
+## Follow-up: away score centering was still off after the box-trim fix
+
+Confirmed via a real screenshot: after fixing the yellow box's trim
+direction (previous entry), the score NUMBER's centering math was never
+updated to match -- it was still centering within the OLD zone bounds
+(`32`, width 15, with an extra -1 shift) from before the box moved to
+`x34-46`. Result: 5px of padding on the right vs 1px on the left,
+exactly matching the user's own estimate ("looks like 3px" off).
+
+**Fix:** center directly within the box's actual current bounds (`34`,
+width 13) with no extra shift needed. Verified by measuring true ink
+extent across the full glyph height (not just one row -- an earlier
+measurement attempt scanning a single row gave a misleading result,
+since a digit like "2"'s glyph shape has different lit columns at
+different row heights) -- confirmed exactly 3px/3px, matching the home
+side. Re-ran the full test-mode regression -- still passes.
+
+## Real bug (partially reverted below): "FINAL/OT" rendered as "FINAL 0T" -- missing slash glyph
+
+Confirmed via a real screenshot of an actual overtime game (GB 20,
+NYJ 17): the title read "FINAL 0T" instead of "FINAL/OT". Root cause:
+our own bitmap `FONT` dict never had a `/` glyph at all. `_draw_char`
+silently does nothing for an unrecognized character, but the caller
+still advances the cursor by the default width regardless -- so the `/`
+became an invisible blank gap, and "FINAL" + gap + "OT" read as
+"FINAL 0T" at this pixel size (capital O reads as 0 that small).
+
+Added a real 3-wide diagonal slash glyph to `FONT` -- this part stands;
+the glyph is still used elsewhere for date strings (`M/D` format). The
+first estimate of the resulting overflow (31px ink vs a 30px zone) was
+wrong -- rechecked with the real `_text_ink_width()` function instead of
+hand math and got 32px, not 31px -- and per explicit follow-up request,
+rather than fix that overflow, "FINAL/OT" was dropped entirely in favor
+of always showing plain "FINAL" (see below).
+
+## "FINAL/OT" dropped entirely -- OT omitted instead of fixing the overflow
+
+Checked using the real `_text_ink_width()` function rather than hand
+math: "FINAL/OT" and "FINAL OT" (space instead of slash) both come out
+to exactly 32px, 2px wider than the 30px zone -- a space costs the same
+advance width as any other character in this font, so dropping the
+slash doesn't help fit it. Per explicit request, this now just always
+shows "FINAL" (20px, comfortably fits), even in overtime. The slash
+glyph added for this stays in `FONT` regardless -- it's used elsewhere
+for date strings (`M/D` format).
+
+## Live priority overhaul: show ANY live game, not just favorites
+
+Previous behavior: the live mode rotated through whatever was in
+`live_games` with favorites merely sorted to the front of that same
+list -- so a favorite team playing live would still share rotation time
+with every other live game, and with no favorite configured or playing,
+there was no cross-mode signal telling the core to stay on live mode at
+all instead of cycling to recent/upcoming on its normal schedule
+regardless of whether something was actually live.
+
+**Explicitly requested behavior:**
+- A favorite team playing live -> show ONLY that game, no rotation to
+  others.
+- No favorite configured, or favorites configured but none currently
+  live -> show every live game, rotating between them.
+- Whenever ANY game is live at all (favorite or not) -> the display
+  should stay on live mode rather than cycling away to recent/upcoming
+  on schedule regardless of content (e.g. Thursday/Monday Night
+  Football, usually the only live game, should hold there instead of
+  briefly showing recent/upcoming every ~15s in between).
+
+**Fix, two parts:**
+1. Inside `display()`'s live-mode game selection: if any favorite team is
+   currently live, `games` narrows to ONLY the favorite's live game(s)
+   before the existing rotation logic runs -- with no favorite live,
+   `games` stays as the full live list, rotating normally (unchanged
+   from before).
+2. Added `has_live_content()` -- a real `BasePlugin` framework hook,
+   confirmed from baseball's own current source: the display controller
+   checks this (alongside `has_live_priority()`, already implemented by
+   BasePlugin itself from the existing `live_priority` config toggle) to
+   decide whether to stay on a plugin's live mode instead of rotating
+   away on schedule. Deliberately differs from baseball's own version
+   here: baseball only returns `True` for a favorite specifically live;
+   this plugin returns `True` whenever ANY game is live at all, matching
+   the explicitly requested "any time there is a live game going on"
+   behavior rather than baseball's favorite-only one.
+
+**Verified** with five scenarios covering every case described: a single
+live game with no favorite (shown, `has_live_content()` True), multiple
+live games with no favorite (rotates through more than one over
+simulated time), multiple live games with a favorite playing (shows
+ONLY the favorite's game across every sampled time offset), a favorite
+configured but not currently playing (falls back to showing/rotating all
+live games normally), and no live games at all (`has_live_content()`
+False, `display()` returns False). Re-ran the full test-mode regression
+-- still passes.
+
 ## Suggested next steps
 
 1. ~~Verify yard-line math~~ done above.

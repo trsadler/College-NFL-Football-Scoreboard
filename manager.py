@@ -234,6 +234,7 @@ FONT = {
     '8': ['111', '101', '111', '101', '111'],
     '9': ['111', '101', '111', '001', '110'],
     '&': ['110', '110', '111', '101', '011'],
+    '/': ['001', '001', '010', '100', '100'],
     ':': ['000', '010', '000', '010', '000'],
 }
 
@@ -1212,6 +1213,30 @@ class NFLCollegeScoreboardPlugin(BasePlugin):
         index = int(time.time() // max(duration_seconds, 1)) % len(games)
         return games[index]
 
+    def has_live_content(self) -> bool:
+        """
+        Framework hook (BasePlugin) confirmed from baseball's own real,
+        currently-working source: the display controller checks this
+        (alongside has_live_priority(), already implemented by BasePlugin
+        itself, reading the `live_priority` config toggle) to decide
+        whether to stay on this plugin's live mode instead of rotating
+        away to something else on schedule.
+
+        Explicitly requested to differ from baseball's own version here:
+        baseball only returns True when a FAVORITE team is specifically
+        live (favorite live = exclusive cross-plugin priority too). This
+        plugin returns True whenever ANY game is live at all, regardless
+        of favorites -- e.g. Thursday/Monday Night Football should keep
+        the display locked on live mode even with no favorite team
+        involved, only falling back to recent/upcoming rotation once
+        nothing is actually live. The favorite-exclusive behavior (only
+        show MY team, not the whole slate) is handled separately, inside
+        display()'s own game selection for live mode -- this hook is
+        purely about whether to stay on live mode at the cross-mode
+        rotation level, not which specific game to show once there.
+        """
+        return bool(self.live_games)
+
     def display(self, force_clear: bool = False, display_mode: Optional[str] = None) -> bool:
         """
         Real bug found and fixed here: the core's display_controller
@@ -1251,11 +1276,31 @@ class NFLCollegeScoreboardPlugin(BasePlugin):
             games = getattr(self, games_attr, None) or []
             if not games:
                 return False
+
+            favorite_teams = self.config.get("favorite_teams", [])
+
+            # Live-specific priority, explicitly requested: a favorite
+            # team playing live should be shown EXCLUSIVELY (no rotating
+            # to other live games at all), but with no favorite currently
+            # live (either none configured, or none of them are playing
+            # right now), show every live game and rotate normally --
+            # e.g. Thursday/Monday Night Football (usually the only live
+            # game) stays locked on that one game either way, while a
+            # busy Sunday slate rotates through all of them unless a
+            # favorite is on.
+            if display_mode == "nfl_college_live" and favorite_teams:
+                favorite_live = [
+                    g for g in games
+                    if g.get("away_abbr") in favorite_teams or g.get("home_abbr") in favorite_teams
+                ]
+                if favorite_live:
+                    games = favorite_live  # exclusively this/these, nothing else
+
             section_cfg = self.config.get(section_key, {})
             games_to_show = section_cfg.get("games_to_show")
             if games_to_show:
                 games = games[:games_to_show]
-            games = self._favorite_first(games, self.config.get("favorite_teams", []))
+            games = self._favorite_first(games, favorite_teams)
             duration = section_cfg.get("game_duration_seconds", 15)
             game = self._pick_rotated_game(games, duration)
             draw_method = getattr(self, draw_method_name)
@@ -1451,7 +1496,19 @@ class NFLCollegeScoreboardPlugin(BasePlugin):
             # if this team won -- everything else stays continuous.
             # Zone widened from 14 to 15px -- the stroke moved 1px inward
             # (toward FINAL) below, and this zone absorbs the freed column.
-            score_x0 = centered_x(away_team["score"], 32, 15) - 1  # 1px left, per request
+            # Real bug found and fixed here: this used to center within
+            # the OLD full zone (32, width 15) with an extra -1 shift --
+            # left over from before the yellow box's trim direction was
+            # fixed (previously x32-44, now x34-46). The box itself moved
+            # but this centering math never did, so the score number was
+            # still centered relative to where the box USED to be, not
+            # where it actually is now -- confirmed via a real screenshot
+            # showing 5px of padding on the right vs 1px on the left.
+            # Centering directly within the box's real bounds (34, width
+            # 13) needs no extra shift; verified this gives 3px/3px,
+            # matching the home side (which needed no change, since ITS
+            # box start happens to match its full zone's start already).
+            score_x0 = centered_x(away_team["score"], 34, 13)
             if away_won:
                 # Real bug found and fixed here: this box's trim was cut
                 # from its RIGHT edge (x32-44 of the full x32-46 zone),
@@ -1486,8 +1543,12 @@ class NFLCollegeScoreboardPlugin(BasePlugin):
             # score zones each grow by 1px to absorb their freed column.
             draw.rectangle([47, 0, 48, TOP_H - 1], fill=STROKE)
 
-            period = game.get("period", 0)
-            title = "FINAL/OT" if (period and period > 4) else "FINAL"
+            # Always just "FINAL", even in overtime -- explicitly
+            # requested after confirming neither "FINAL/OT" nor "FINAL OT"
+            # fits this zone (both have the same 32px ink width vs a 30px
+            # zone; removing the slash doesn't help, since a space costs
+            # the same advance width as any other character in this font).
+            title = "FINAL"
             x = centered_x(title, 49, 30)  # middle zone is now x49-78
             for ch in title:
                 self._draw_char(draw, FONT, ch, x, 5, YELLOW)
