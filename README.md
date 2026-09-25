@@ -788,6 +788,34 @@ live games normally), and no live games at all (`has_live_content()`
 False, `display()` returns False). Re-ran the full test-mode regression
 -- still passes.
 
+## Live priority follow-up: has_live_content() alone wasn't enough
+
+Confirmed via explicit report: even with `has_live_content()` in place,
+the display still showed the live game and then cycled into recent
+results anyway. Real cause: that hook apparently only affects
+cross-PLUGIN priority (whether the core stays on this plugin instead of
+switching to a different one) -- it doesn't stop the core from still
+cycling through THIS plugin's own three declared modes on their normal
+schedule. Recent/upcoming honestly returning `True` (since they had
+real content) was enough for the core to show them on their turn,
+regardless of live content existing elsewhere in the same plugin.
+
+**Fix:** recent/upcoming now explicitly return `False` -- refusing to
+show anything at all -- whenever `self.live_games` is non-empty,
+regardless of favorites, per explicit request ("I want the live game to
+always be prioritized even if it is not my favorite team"). Once
+`live_games` empties out (the live game(s) end), recent/upcoming
+immediately resume normally.
+
+**Verified:** reproduced the exact reported scenario (live game active,
+recent AND upcoming both also populated, no favorite configured) --
+confirmed live returns `True` while recent and upcoming both correctly
+return `False`. Confirmed recent/upcoming resume returning `True` again
+once `live_games` is emptied, so this doesn't permanently break them,
+only suppresses them while something is actually live. Re-ran the full
+test-mode regression -- still passes (that path doesn't go through
+`display_mode` at all, so it's unaffected by this change).
+
 ## Suggested next steps
 
 1. ~~Verify yard-line math~~ done above.

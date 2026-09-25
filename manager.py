@@ -1272,6 +1272,28 @@ class NFLCollegeScoreboardPlugin(BasePlugin):
             if mapping is None:
                 self.logger.warning(f"Unknown display_mode {display_mode!r}, nothing to show")
                 return False
+
+            # Real bug found and fixed here: has_live_content() alone
+            # (added last round) didn't stop the display from cycling
+            # away to recent/upcoming -- confirmed via explicit report:
+            # "shows the live game then starts cycling through previous
+            # game results" even with a live game still in progress.
+            # That hook apparently only affects cross-PLUGIN priority
+            # (whether the core stays on this plugin instead of a
+            # different one) -- it doesn't stop the core from still
+            # cycling through THIS plugin's own three declared modes on
+            # their normal schedule, since recent/upcoming honestly
+            # reporting "yes, I have content" (returning True) is enough
+            # for the core to show them on their turn regardless of live
+            # content existing elsewhere in the same plugin. Explicitly
+            # requested: live should always win over recent/upcoming
+            # whenever ANY game is live, regardless of favorites -- so
+            # recent/upcoming now actively refuse to show anything (return
+            # False) while live content exists, rather than just letting
+            # has_live_content() try to signal it indirectly.
+            if display_mode in ("nfl_college_recent", "nfl_college_upcoming") and self.live_games:
+                return False
+
             section_key, games_attr, draw_method_name = mapping
             games = getattr(self, games_attr, None) or []
             if not games:
