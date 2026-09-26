@@ -1047,6 +1047,188 @@ computing from the abbreviation's actual rendered width, so removing
 the length cap didn't require any additional layout change). Also
 re-ran the full test-mode regression -- still passes.
 
+## Real bug: possession icon collided with the score for wide abbreviation/score combinations
+
+Confirmed via explicit user report: a 4-letter abbreviation combined
+with a double-digit score broke the possession icon. Root cause: the
+icon was still hardcoded at a fixed `x=49` -- left over from when
+abbreviations were forcibly truncated to 3 characters and the score
+always started at a fixed position, so `x=49` was always safely past
+both. Once abbreviations were allowed their real 4-character length
+(the previous fix) and the score's own position became dynamic (the
+fix before that), a wide combination -- e.g. NAVY, which is both 4
+characters and contains the extra-wide N glyph -- plus a 2-digit score
+could push the score text's actual end past x=49, so the icon would
+draw directly on top of the score's last digit.
+
+**Fix:** the icon's position now derives from wherever the score
+actually finished (plus a small gap), the same self-correcting approach
+already used for the score's own position relative to the abbreviation.
+
+**Verified:** rendered the worst realistic combination directly --
+NAVY, score 21, possession true -- and confirmed via direct pixel
+inspection that the score text ends at x=52 and the icon now starts
+cleanly at x=56, no overlap. Visual render confirms it reads correctly.
+Re-ran the full test-mode regression -- still passes.
+
+## Logo contrast fix, revised: darkened team color instead of a white/black backdrop
+
+The white/black ellipse backdrop (previous entry) was functionally
+correct but disliked stylistically -- an unrelated neutral shape
+breaking the team's own color identity. Replaced per explicit request:
+back to a solid team-color box exactly like the original design, but
+darkened (`color * 0.55`, clamped at 0) rather than left at full
+brightness. The logo itself stays at its original brightness, so
+darkening only the background creates a real gap between them without
+introducing a foreign color -- same hue, just visibly darker, preserving
+team identity instead of overriding it.
+
+**Verified, including an honest limitation:** re-rendered the same
+synthetic MSU case as before (logo color exactly matching its team
+background) -- confirmed the logo is now visibly distinguishable against
+the darkened background, subtler than the white backdrop but present,
+matching the requested look. Also tested the genuine worst case directly
+-- a near-black logo on an already-black team color -- and confirmed
+contrast is weak there, since darkening an already-dark color doesn't
+create much separation. Real team logos generally have lighter accent
+elements even on dark primary colors (Iowa's real logo includes gold,
+not solid black), so this is more a synthetic worst case than a likely
+real one, but it's a genuine limit of this approach worth knowing rather
+than glossing over. Re-ran the full test-mode regression -- still
+passes.
+
+## Logo contrast: white fallback for near-black team colors
+
+Per explicit follow-up request, addressing the honest limitation flagged
+in the previous entry: teams whose own color is already very dark (true
+black, very dark navy) fall back to a plain white background instead of
+a darkened version of their own color, since darkening an already-dark
+color doesn't create meaningful separation. Most teams still get the
+darkened-own-color treatment -- this fallback only applies below a
+brightness floor.
+
+**Real bug caught before shipping, not after:** an initial threshold of
+60 was tested against MSU's own color brightness (~50.7) and would have
+incorrectly caught it too, even though MSU's darkened treatment was
+already confirmed working visually in the previous fix. Lowered to 25
+so only genuinely near-black colors trigger the white fallback, not
+MSU's darker green.
+
+**Verified:** re-rendered MSU (brightness ~50.7) and confirmed it still
+correctly uses the darkened-green treatment, not white. Re-rendered a
+near-black team color (0,0,0) and confirmed it now correctly falls back
+to a clean white background with the logo clearly visible. Re-ran the
+full test-mode regression -- still passes.
+
+## Real bug: absolute worst-case info row overflowed the display
+
+Found by direct request to stress-test the right side: period "Q1" + a
+full "15:00" clock + a long down/distance like "4TH&25" + a 4-letter
+team abbreviation ("IOWA") in the field position. Measured (not
+estimated) via the real `_text_ink_width()` function: this combination
+needs 79px but only 70px is available, a confirmed 9px overflow --
+visually, "IOWA" got clipped right at the display's edge.
+
+**First fix attempt (superseded below):** tightened two of the fixed
+gaps and always capped the field-position team at 3 characters. This
+closed 6 of the 9px, but a second direct measurement showed 3px still
+overflowing (confirmed visually too -- the yard number's last digit was
+still clipped). Rather than tighten spacing further (which would affect
+every game, not just this rare combination), asked which trade-off was
+preferred.
+
+**Actual fix, per explicit direction:** reverted the universal gap
+tightening and the always-3-char cap. Instead, the exact width the
+field-position team + yard number would need is computed BEFORE drawing
+(via `_text_ink_width`, not guessed), and the team prefix is dropped
+entirely (showing just the yard number, e.g. "25" instead of "IOWA 25")
+only when that specific game's combination would actually push past the
+display's right edge. Every other game keeps the full team name exactly
+as before, unaffected.
+
+**Verified:** re-rendered the exact worst case (Q1, 15:00, 4th & 25,
+IOWA) and confirmed via direct pixel measurement it now fits with 7px to
+spare, team prefix correctly dropped, no clipping. Re-rendered a normal
+case (Q4, 2:14, 3rd & 7, BUF) and confirmed it still shows the full
+"BUF 43" with room to spare, unaffected by the fix. Re-ran the full
+test-mode regression -- still passes.
+
+## Info row redesigned to two lines, replacing the conditional-drop fix
+
+Per explicit follow-up: rather than ever conditionally dropping the
+field-position team name (the previous fix), down/distance now moves to
+its own line below quarter+time, freeing enough width that field
+position never needs special-casing again -- it always shows in full.
+
+**New layout:** row 1 (y=6) is period/clock + field position (team +
+yard, always full length). Row 2 (y=14, left-aligned under quarter+time,
+not centered under the whole row) is down/distance alone. Confirmed
+~16px of vertical space was available between the old single-line info
+row and the field strip (which starts at y=27), comfortably enough for
+a second text line.
+
+**Verified via the same measurement approach as the fix this replaces:**
+re-measured the identical absolute worst case (Q1, 15:00, 4th & 25,
+IOWA) -- row 1 (period+clock+full "IOWA 25") now needs at most ~53px
+against 70px available (17px to spare), row 2 (just "4TH&25") uses far
+less than the full width on its own line. No conditional logic left --
+every game always shows the same two-row structure with nothing ever
+dropped. Re-rendered a normal case (BUF, 3rd & 7) and the end-of-period
+case ("END Q2") to confirm both still look correct with the new row
+structure -- end-of-period correctly shows nothing on row 2, since
+down/distance is already suppressed entirely in that state. Re-ran the
+full test-mode regression -- still passes.
+
+## Real bug: info row could collide with the ball-position yard number
+
+Per explicit request, checked before it caused a visible problem: the
+field's ball-position yard number (`_draw_field`) is drawn at y=18. Row
+2 (down/distance, from the two-row redesign above) sat at y=14, ending
+around y=18-19 -- directly in the yard number's own space. As the ball
+approaches either end zone, that number can land horizontally under
+this row too, so the two would visibly overlap.
+
+**Fix:** shifted both info rows up 3px (row 1: y=6 -> y=3, row 2:
+y=14 -> y=11). Row 2 now ends around y=16, leaving real clearance before
+the yard number starts at y=18 instead of running into it.
+
+**Verified:** rendered the specific collision-prone scenario directly --
+1st & goal from the 5, ball near the end zone -- and confirmed via
+direct pixel inspection there's no actual content clipping at the
+display's top edge (an initial check flagged pixels above y=3, but
+those turned out to be the team-stack divider line, which spans the
+full height by design, not text -- rechecked excluding that column and
+confirmed clean). Visual render confirms real separation between
+"1ST&GOAL" and the yard number above the ball. Re-ran the full
+test-mode regression -- still passes.
+
+## Possession icon redesigned: fixed position in the logo block, white instead of brown
+
+Confirmed via explicit user report: the team-stack possession icon,
+positioned dynamically after wherever the score ended (a fix from an
+earlier round), could reach x=54 -- the divider between the team stack
+and info row -- in the worst-case combination (a 4-character
+abbreviation with the wide N glyph, plus a 2-digit score), visibly
+running into it.
+
+**Fix, per explicit direction:** the icon no longer depends on
+abbreviation/score width at all. It now lives at a fixed position
+(x=20-23) on the right side of the logo block itself, with the logo
+shifted slightly left within that same block (thumbnailed to a 21px-wide
+area instead of the full 25px) to make room. Also changed from brown to
+white, for reliable contrast against any team's background color --
+brown risked the same problem the earlier logo-contrast fixes addressed,
+disappearing against a similarly warm/dark team color.
+
+**Verified:** re-rendered the exact worst case (NAVY, 2-digit score,
+possession true) and confirmed via direct pixel inspection the icon sits
+at x=20-23, nowhere near the x=54 divider, completely unaffected by the
+score's own width. Confirmed the no-possession case correctly shows no
+icon, and the no-logo fallback case (flat color swatch) still renders
+correctly. Re-rendered a full scorebug layout to confirm everything
+looks right together. Re-ran the full test-mode regression -- still
+passes.
+
 ## Suggested next steps
 
 1. ~~Verify yard-line math~~ done above.

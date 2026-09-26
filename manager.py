@@ -1914,13 +1914,6 @@ class NFLCollegeScoreboardPlugin(BasePlugin):
                     self.logger.debug(f"Logo load failed for {team['abbr']}: {e}")
 
             if logo is not None:
-                # _load_and_resize_logo thumbnails to up to 1.5x display size,
-                # not our specific 25x16 box -- fit it down to that box,
-                # preserving aspect ratio, and center it on a plain background
-                # of the team's color so mismatched logo aspect ratios don't
-                # leave an awkward black gap.
-                draw.rectangle([0, y_base, 24, y_base + 15], fill=team["color"])
-
                 # REAL BUG, CONFIRMED via explicit user report: for teams
                 # like Michigan State, Iowa, and Utah, the logo was nearly
                 # invisible against its own background -- because the
@@ -1928,35 +1921,46 @@ class NFLCollegeScoreboardPlugin(BasePlugin):
                 # and a logo's dominant color frequently matches that
                 # team's color by design (MSU's green helmet on a green
                 # background, Iowa's black-and-gold on black, Utah's red
-                # on red). No amount of tuning the background color choice
-                # fixes this in general, since it's the SAME color on
-                # purpose for team identity -- any fix has to break that
-                # match specifically behind the logo.
+                # on red).
                 #
-                # Fix: an ellipse backdrop behind the logo only (not the
-                # whole box, so the team color still shows around the
-                # edges for identity), white by default but switching to
-                # black when the team's own color is already
-                # light/whitish (otherwise a white team like a mostly-white
-                # helmet logo would face the identical problem in
-                # reverse). Sized to the logo's own fitted dimensions plus
-                # a small margin, not the full box, so it doesn't overwhelm
-                # the limited 25x16 space.
-                fitted = logo.copy()
-                fitted.thumbnail((25, 16), Image.Resampling.LANCZOS)
-                paste_x = (25 - fitted.width) // 2
-                paste_y = y_base + (16 - fitted.height) // 2
-
+                # A first fix tried a white/black ellipse backdrop behind
+                # the logo -- functionally correct, but disliked
+                # stylistically (an unrelated neutral shape breaking the
+                # team's own color identity). Replaced with darkening the
+                # team's own color instead -- the logo stays at its
+                # original brightness, so darkening only the background
+                # creates a brightness gap without introducing a foreign
+                # color. But confirmed via direct testing that this has a
+                # real limit: a team whose color is ALREADY very dark
+                # (near-black) can't be darkened any further into useful
+                # contrast -- darkening dark colors doesn't create much
+                # separation. Per explicit follow-up request, teams below
+                # this brightness floor fall back to a plain white
+                # background instead (only these teams, not the general
+                # case -- most teams still get the darkened-own-color
+                # treatment, which was the whole point of moving away
+                # from a backdrop that applied to everyone).
+                # Real bug caught before shipping: an initial threshold of
+                # 60 would have incorrectly caught MSU too (its own color
+                # brightness is ~50.7) -- but MSU's darkened version was
+                # already confirmed working visually in the prior fix.
+                # Lowered to 25 so only genuinely near-black colors (true
+                # blacks and very-dark navies, not MSU's darker green)
+                # fall back to white.
                 team_brightness = sum(team["color"]) / 3
-                backdrop_color = BLACK if team_brightness > 175 else WHITE
-                margin = 1
-                draw.ellipse(
-                    [
-                        paste_x - margin, paste_y - margin,
-                        paste_x + fitted.width + margin, paste_y + fitted.height + margin,
-                    ],
-                    fill=backdrop_color,
-                )
+                if team_brightness < 25:
+                    bg_color = WHITE
+                else:
+                    bg_color = tuple(max(0, int(c * 0.55)) for c in team["color"])
+                draw.rectangle([0, y_base, 24, y_base + 15], fill=bg_color)
+                fitted = logo.copy()
+                # Shifted slightly left within the block (was dead-center
+                # across the full 25px width) per explicit request, to
+                # open up room on the right side of the block for the
+                # possession icon -- see below.
+                fitted.thumbnail((21, 16), Image.Resampling.LANCZOS)
+                paste_x = (21 - fitted.width) // 2
+                paste_y = y_base + (16 - fitted.height) // 2
                 img.paste(fitted, (paste_x, paste_y), fitted)
             else:
                 # Fallback: flat color swatch if the logo couldn't be loaded
@@ -1964,6 +1968,36 @@ class NFLCollegeScoreboardPlugin(BasePlugin):
                 # tries to create a placeholder logo file in that case, so
                 # this is a last-resort, not the expected common path)
                 draw.rectangle([0, y_base, 24, y_base + 15], fill=team["color"])
+
+            # Possession icon: fixed position on the right side of the
+            # logo block itself, not dependent on abbreviation/score
+            # width at all.
+            #
+            # REAL BUG FOUND AND FIXED HERE, per explicit user report:
+            # this used to be positioned dynamically after wherever the
+            # score ended (a fix from an earlier round, itself fixing a
+            # fixed x=49 that broke for wide abbreviations). In the
+            # worst-case combination (a 4-character abbreviation with the
+            # extra-wide N glyph, plus a 2-digit score), that dynamic
+            # position could land at or past x=54 -- the divider between
+            # the team stack and the info row -- visibly running into it.
+            # Moving the icon into the logo block's own fixed space
+            # instead makes it completely independent of abbreviation/
+            # score width, so it can never approach the divider
+            # regardless of how wide either one gets. Also changed from
+            # brown to white per explicit request, for reliable contrast
+            # against any team's own background color (brown could
+            # itself get lost against a similarly dark/warm background,
+            # the same class of problem the logo contrast fixes above
+            # were about).
+            if show_extras and team["possession"]:
+                icon_x = 20
+                icon_y = y_base + 6
+                small_football = ['0110', '1111', '0110']
+                for row, bitrow in enumerate(small_football):
+                    for col, bit in enumerate(bitrow):
+                        if bit == '1':
+                            draw.point((icon_x + col, icon_y + row), fill=WHITE)
 
             # Abbreviation + score, side by side. Score position is
             # derived from wherever the abbreviation actually ended (plus
@@ -1984,15 +2018,6 @@ class NFLCollegeScoreboardPlugin(BasePlugin):
 
             if not show_extras:
                 continue  # Recent/Upcoming games have no possession or timeouts
-
-            # Football possession icon (small version, 4x3, reused from the
-            # earlier mockup's possession indicator)
-            if team["possession"]:
-                small_football = ['0110', '1111', '0110']
-                for row, bitrow in enumerate(small_football):
-                    for col, bit in enumerate(bitrow):
-                        if bit == '1':
-                            draw.point((49 + col, y_base + 5 + row), fill=BROWN)
 
             # Timeout row: horizontal, left-aligned with abbreviation.
             # team["timeouts"] can genuinely be None (ESPN doesn't
@@ -2120,20 +2145,35 @@ class NFLCollegeScoreboardPlugin(BasePlugin):
         return fallback_team, f"{fallback_team} {fallback_yard}".strip(), fallback_yard
 
     def _draw_info_row(self, draw, game):
-        cursor = [57]  # mutable so the nested helper can advance it
+        # Row 1 (quarter/clock + field position) and row 2 (down/distance)
+        # each get their own cursor/y-position now -- see the redesign
+        # note below for why.
+        #
+        # REAL BUG FOUND AND FIXED HERE, per explicit request: the field's
+        # ball-position yard number (see _draw_field) is drawn at y=18.
+        # Row 2 here previously sat at y=14, ending around y=18-19 --
+        # directly in the yard number's own space. As the ball approaches
+        # either end zone, that number can land under this row
+        # horizontally too, so the two would visibly collide. Shifted
+        # both rows up 3px (row1 6->3, row2 14->11) to open up clearance:
+        # row 2 now ends around y=16, leaving a real gap before the yard
+        # number starts at y=18, instead of overlapping it.
+        cursor = [57]
+        row1_y = 3
+        row2_y = 11
 
-        def draw_char(ch, color, last=False):
+        def draw_char(ch, color, y, last=False):
             bits = FONT.get(ch)
             char_width = 1 if ch == ':' else (len(bits[0]) if bits else 3)
             if bits:
                 for row, bitrow in enumerate(bits):
                     if ch == ':':
                         if bitrow[1] == '1':
-                            draw.point((cursor[0], 6 + row), fill=color)
+                            draw.point((cursor[0], y + row), fill=color)
                     else:
                         for col in range(char_width):
                             if bitrow[col] == '1':
-                                draw.point((cursor[0] + col, 6 + row), fill=color)
+                                draw.point((cursor[0] + col, y + row), fill=color)
             cursor[0] += char_width + (0 if last else 1)
 
         period_text = game.get("period_text", "")
@@ -2157,24 +2197,44 @@ class NFLCollegeScoreboardPlugin(BasePlugin):
         )
         field_pos_str = "" if is_end_of_period else self._parse_possession_text(game)[1]
 
+        # Row 1: period + clock + gap + FULL field position (team + yard,
+        # never truncated or dropped).
+        #
+        # REDESIGN, per explicit direction, replacing an earlier fix: the
+        # absolute worst case (period "Q1" + a full "15:00" clock + a
+        # long down/distance like "4TH&25" + a 4-letter team abbreviation
+        # in the field position) was confirmed via direct measurement to
+        # overflow the available width by 9px. A first fix conditionally
+        # dropped the field-position team only when it would overflow;
+        # this replaces that entirely by moving down/distance to its own
+        # line below, which frees up enough width that field position
+        # never needs special-casing at all -- confirmed via the same
+        # measurement approach: with down/distance removed from this
+        # line, even the worst case (period+clock+full 4-letter team+
+        # yard) needs at most ~53px against 70px available, comfortably
+        # under budget with no conditional logic required.
         for ch in period_text:
-            draw_char(ch, WHITE)
+            draw_char(ch, WHITE, row1_y)
         cursor[0] += 1
         for ch in clock:
-            draw_char(ch, WHITE)
-
-        cursor[0] += 3
-        for ch in down_distance[:-1]:
-            draw_char(ch, GOALPOST_YELLOW)
-        if down_distance:
-            draw_char(down_distance[-1], GOALPOST_YELLOW)
+            draw_char(ch, WHITE, row1_y)
 
         cursor[0] += 3
         parts = field_pos_str.split(" ", 1)
         for ch in parts[0]:
-            draw_char(ch, WHITE)
+            draw_char(ch, WHITE, row1_y)
         if len(parts) > 1:
             cursor[0] += 1
             for ch in parts[1][:-1]:
-                draw_char(ch, WHITE)
-            draw_char(parts[1][-1], WHITE, last=True)
+                draw_char(ch, WHITE, row1_y)
+            draw_char(parts[1][-1], WHITE, row1_y, last=True)
+
+        # Row 2: down/distance alone, left-aligned under quarter+time
+        # (starting at the same left edge as row 1, not centered under
+        # the whole row).
+        cursor[0] = 57
+        for ch in down_distance[:-1]:
+            draw_char(ch, GOALPOST_YELLOW, row2_y)
+        if down_distance:
+            draw_char(down_distance[-1], GOALPOST_YELLOW, row2_y, last=True)
+
