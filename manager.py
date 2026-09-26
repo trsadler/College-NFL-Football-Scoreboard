@@ -742,20 +742,33 @@ class NFLCollegeScoreboardPlugin(BasePlugin):
         fixed) -- the caller's try/except is what actually logs this.
         """
         url = f"https://site.api.espn.com/apis/site/v2/sports/football/{league}/scoreboard"
-        # REAL BUG FOUND AND FIXED HERE: this used to send no parameters
-        # at all, relying entirely on ESPN's undocumented default result
-        # count. Confirmed on real hardware: a specific favorite team's
-        # game (Michigan State vs Nebraska, kicked off on schedule) was
-        # completely absent from this fetch's results -- not
-        # misidentified, not a mismatched abbreviation, genuinely never
-        # returned by ESPN at all -- while every other currently-live
-        # college football game DID come through fine. NFL never hit this
-        # because it only has 16 games max per week; college football
-        # (130+ FBS teams, commonly dozens of games on a single Saturday)
-        # is exactly the case an undocumented default cap would silently
-        # truncate. Added an explicit, generous limit so this can't
-        # recur regardless of how large a given week's slate is.
+        # REAL BUG, FOUND AND FIXED IN TWO ROUNDS:
+        #
+        # Round 1 (incomplete/wrong): added limit=300, on the theory that
+        # an unset limit was silently truncating a large slate. Confirmed
+        # WRONG on real hardware -- the exact same 6 live games persisted
+        # even after that fix was confirmed successfully deployed, with a
+        # specific favorite's game (Michigan State vs Nebraska, kicked
+        # off on schedule and in progress) still completely absent.
+        #
+        # Round 2 (the actual fix): confirmed via multiple independent
+        # sources that ESPN's college-football scoreboard endpoint
+        # specifically defaults to a much smaller subset regardless of
+        # `limit` -- one source states this outright ("only outputs top
+        # 25 events by default"). The real fix is `groups=80` (ESPN's ID
+        # for the whole FBS division) -- `limit` alone controls how many
+        # results come back WITHIN whatever default grouping is already
+        # applied; it does nothing to expand which games are eligible to
+        # be included in the first place. NFL has no such concept (one
+        # league, no group filter needed) and was never affected --
+        # college football has 130+ FBS teams across many conferences,
+        # exactly the case ESPN's undocumented default group excludes
+        # much of. `groups` only applies to college-football; passing it
+        # for `nfl` would be meaningless (harmless either way, but scoped
+        # to avoid confusion).
         params = {"limit": 300}
+        if league == "college-football":
+            params["groups"] = 80
         resp = self.session.get(url, params=params, timeout=10)
         if not resp.ok:
             self.logger.error(
@@ -815,8 +828,15 @@ class NFLCollegeScoreboardPlugin(BasePlugin):
         for offset in range(1, days_back + 1):
             day = today - timedelta(days=offset)
             date_param = day.strftime("%Y%m%d")
+            # Same groups=80 fix as _fetch_league_scoreboard, for the
+            # same reason -- ESPN's college-football scoreboard defaults
+            # to a much smaller subset regardless of any limit, and a
+            # single day's full FBS slate can still exceed that default.
+            params = {"dates": date_param, "limit": 300}
+            if league == "college-football":
+                params["groups"] = 80
             try:
-                resp = self.session.get(url, params={"dates": date_param}, timeout=10)
+                resp = self.session.get(url, params=params, timeout=10)
                 if not resp.ok:
                     self.logger.error(
                         f"ESPN recent-lookback fetch for {league}/{date_param} got HTTP "

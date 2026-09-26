@@ -853,7 +853,7 @@ priority is already applied unconditionally, which happens to match
 what this setting implies it should do), but it's a dead, misleading
 config option that should either be wired up or removed for clarity.
 
-## Real root cause, finally found: MSU's live game was never in the fetch at all
+## Real root cause, finally found (in two rounds): MSU's live game was never in the fetch at all
 
 After the git-update deadlock was cleared and this project's own
 diagnostic logging (`Live games in {league}: ...`, added earlier)
@@ -865,25 +865,41 @@ correctly extracted, and MSU's game simply wasn't among them. Not a
 matching bug, not an abbreviation mismatch -- ESPN's response to this
 plugin's own request genuinely didn't include it.
 
-Root cause: `_fetch_league_scoreboard()` sent no parameters at all,
-relying entirely on ESPN's undocumented default result count. NFL never
-exposed this (16 teams, 16 games max per week -- comfortably under any
-plausible default cap), but college football has 130+ FBS teams and
-commonly several dozen games on a single Saturday, which a default cap
-can silently truncate without any error or indication that anything was
-left out.
+**Round 1 (confirmed WRONG on real hardware, not just incomplete):**
+theorized the cause was an unset `limit` letting ESPN's default result
+count silently truncate a large slate, and added `limit=300`. This was
+tested and confirmed deployed successfully -- and the exact same 6-game
+list persisted, unchanged, with MSU's game still completely absent.
+`limit` alone did nothing.
 
-**Fix:** added an explicit `limit=300` parameter to the main scoreboard
-fetch, generous enough to comfortably cover an entire Saturday's slate
-regardless of how large it gets. Confirmed via direct inspection that
-the request now actually carries this parameter. Re-ran the full
-test-mode regression -- still passes.
+**Round 2 (the actual fix):** confirmed via multiple independent sources
+that ESPN's college-football scoreboard endpoint specifically defaults
+to a much smaller subset of games regardless of `limit` -- one source
+states outright that it "only outputs top 25 events by default." The
+real fix is a separate `groups` parameter -- `groups=80` is ESPN's ID
+for the entire FBS division. `limit` only controls how many results
+come back *within* whatever default grouping is already applied; it
+does nothing to expand which games are eligible for inclusion in the
+first place. NFL has no such concept (one league, no conference/division
+grouping to filter by) and was never affected by this -- college
+football's 130+ FBS teams across many conferences is exactly the case
+ESPN's undocumented default group excludes much of. Added `groups=80`
+(scoped to `college-football` only) to both `_fetch_league_scoreboard()`
+and `_fetch_recent_lookback()`, since both hit the same endpoint and the
+lookback's per-day college-football queries could suffer the identical
+truncation for past results.
 
-**Still needs verification on a real live game with a favorite playing**
--- this fixes the specific gap the diagnostic logging proved existed,
-but hasn't yet been confirmed to make MSU's (or any similarly-affected
-favorite's) game actually appear and get correctly prioritized on real
-hardware, since that requires testing against another live game.
+**Verified:** confirmed via direct inspection of the actual request
+parameters sent -- `college-football` now carries `groups=80` on both
+fetch methods, `nfl` correctly does not (meaningless for a single
+league, scoped out to avoid confusion). Re-ran the full test-mode
+regression -- still passes.
+
+**Still needs verification on a real live game with a favorite
+playing** -- this addresses the specific, confirmed gap the diagnostic
+logging exposed (a real game genuinely missing from ESPN's response),
+but hasn't yet been tested against another real live game to confirm
+MSU's (or any other non-Top-25 favorite's) game now actually appears.
 
 ## Suggested next steps
 
