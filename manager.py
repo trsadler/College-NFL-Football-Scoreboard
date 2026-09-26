@@ -1029,12 +1029,22 @@ class NFLCollegeScoreboardPlugin(BasePlugin):
             # exact field is known to be unreliable for college football
             # specifically ("timeouts remaining were only fixed... for
             # NFL games in-progress; college games still don't work").
-            # Given that, defaulting to None (not 3, and not the
-            # per-competitor path) when genuinely missing, so the
-            # rendering code can skip the indicator entirely rather than
-            # display a value that's wrong either way.
-            details["away_timeouts"] = situation.get("awayTimeouts")
-            details["home_timeouts"] = situation.get("homeTimeouts")
+            #
+            # Per explicit follow-up request, after confirming this is a
+            # genuine ESPN-side data gap (documented by an independent
+            # source hitting the identical limitation) rather than
+            # something this plugin can fix by trying a different field:
+            # timeouts are suppressed entirely for college football,
+            # regardless of what situation.awayTimeouts/homeTimeouts
+            # happens to return for a given game -- NFL keeps the real
+            # extraction, since that source only reported college as
+            # broken.
+            if league == "college-football":
+                details["away_timeouts"] = None
+                details["home_timeouts"] = None
+            else:
+                details["away_timeouts"] = situation.get("awayTimeouts")
+                details["home_timeouts"] = situation.get("homeTimeouts")
 
             # ESPN's scoreboard-level `leaders` -- combined across BOTH
             # teams (one top passer/rusher/receiver for the whole game,

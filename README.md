@@ -1229,6 +1229,33 @@ correctly. Re-rendered a full scorebug layout to confirm everything
 looks right together. Re-ran the full test-mode regression -- still
 passes.
 
+## Timeouts removed for college football entirely -- confirmed genuine data gap
+
+After the `situation.homeTimeouts`/`awayTimeouts` fix (previous entry)
+was deployed, college football timeouts were still confirmed not
+working. Asked directly whether this is a real, unfixable data
+limitation: yes -- an independent third-party source found during the
+original research states this plainly, not just as a guess: "timeouts
+remaining were only fixed... for NFL games in-progress; college games
+still don't work." That's someone else hitting the identical limitation
+at the ESPN API level, independent of this plugin's own field-path
+choice -- strong evidence this isn't something fixable by trying yet
+another field.
+
+**Fix, per explicit request:** timeouts are now suppressed entirely for
+college football -- forced to `None` regardless of what
+`situation.awayTimeouts`/`homeTimeouts` happens to return for a given
+game -- while NFL keeps the real extraction, since the source only
+reported college as broken. The existing rendering fallback (skip the
+indicator entirely on `None`, confirmed in an earlier fix) means this
+required no rendering changes at all, only the extraction change.
+
+**Verified:** fed the identical mocked event through both leagues --
+confirmed NFL still returns the real extracted values (2 and 1 in the
+test) while college football is forced to `None` for both, even though
+the same mock data included non-null values for both team's timeouts.
+Re-ran the full test-mode regression -- still passes.
+
 ## Suggested next steps
 
 1. ~~Verify yard-line math~~ done above.
