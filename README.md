@@ -853,6 +853,38 @@ priority is already applied unconditionally, which happens to match
 what this setting implies it should do), but it's a dead, misleading
 config option that should either be wired up or removed for clarity.
 
+## Real root cause, finally found: MSU's live game was never in the fetch at all
+
+After the git-update deadlock was cleared and this project's own
+diagnostic logging (`Live games in {league}: ...`, added earlier)
+actually reached real hardware, it gave a definitive answer: on a real
+Saturday with MSU vs Nebraska kicked off on schedule and confirmed
+in-progress by the clock, the live college-football list was `OU@UGA,
+MIS@FLA, UTA@ISU, IOW@MIC, HOU@GAS, WIS@PSU` -- six real live games,
+correctly extracted, and MSU's game simply wasn't among them. Not a
+matching bug, not an abbreviation mismatch -- ESPN's response to this
+plugin's own request genuinely didn't include it.
+
+Root cause: `_fetch_league_scoreboard()` sent no parameters at all,
+relying entirely on ESPN's undocumented default result count. NFL never
+exposed this (16 teams, 16 games max per week -- comfortably under any
+plausible default cap), but college football has 130+ FBS teams and
+commonly several dozen games on a single Saturday, which a default cap
+can silently truncate without any error or indication that anything was
+left out.
+
+**Fix:** added an explicit `limit=300` parameter to the main scoreboard
+fetch, generous enough to comfortably cover an entire Saturday's slate
+regardless of how large it gets. Confirmed via direct inspection that
+the request now actually carries this parameter. Re-ran the full
+test-mode regression -- still passes.
+
+**Still needs verification on a real live game with a favorite playing**
+-- this fixes the specific gap the diagnostic logging proved existed,
+but hasn't yet been confirmed to make MSU's (or any similarly-affected
+favorite's) game actually appear and get correctly prioritized on real
+hardware, since that requires testing against another live game.
+
 ## Suggested next steps
 
 1. ~~Verify yard-line math~~ done above.

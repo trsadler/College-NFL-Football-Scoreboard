@@ -742,7 +742,21 @@ class NFLCollegeScoreboardPlugin(BasePlugin):
         fixed) -- the caller's try/except is what actually logs this.
         """
         url = f"https://site.api.espn.com/apis/site/v2/sports/football/{league}/scoreboard"
-        resp = self.session.get(url, timeout=10)
+        # REAL BUG FOUND AND FIXED HERE: this used to send no parameters
+        # at all, relying entirely on ESPN's undocumented default result
+        # count. Confirmed on real hardware: a specific favorite team's
+        # game (Michigan State vs Nebraska, kicked off on schedule) was
+        # completely absent from this fetch's results -- not
+        # misidentified, not a mismatched abbreviation, genuinely never
+        # returned by ESPN at all -- while every other currently-live
+        # college football game DID come through fine. NFL never hit this
+        # because it only has 16 games max per week; college football
+        # (130+ FBS teams, commonly dozens of games on a single Saturday)
+        # is exactly the case an undocumented default cap would silently
+        # truncate. Added an explicit, generous limit so this can't
+        # recur regardless of how large a given week's slate is.
+        params = {"limit": 300}
+        resp = self.session.get(url, params=params, timeout=10)
         if not resp.ok:
             self.logger.error(
                 f"ESPN scoreboard fetch for {league} got HTTP {resp.status_code} -- "
