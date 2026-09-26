@@ -1089,6 +1089,21 @@ class NFLCollegeScoreboardPlugin(BasePlugin):
                 f"Fetched {league} OK: {live_count} live, {recent_count} recent, "
                 f"{upcoming_count} upcoming"
             )
+            if live_count:
+                # Diagnostic: lists every live game's exact extracted
+                # abbreviations for this league. Needed to debug a real
+                # report -- a configured favorite team supposedly playing
+                # live never got shown/prioritized, and the only way to
+                # confirm whether that's an extraction mismatch (wrong
+                # abbreviation string) vs. something else is to see
+                # exactly what string this plugin actually extracted for
+                # each live game, not assume it matches what ESPN's
+                # website displays.
+                this_league_live = [g for g in all_live if g.get("league") == league]
+                self.logger.info(
+                    f"Live games in {league}: "
+                    + ", ".join(f"{g.get('away_abbr')}@{g.get('home_abbr')}" for g in this_league_live)
+                )
 
             # Merge in last week's finished games -- the main scoreboard
             # call above only covers the CURRENT NFL week, so a game that
