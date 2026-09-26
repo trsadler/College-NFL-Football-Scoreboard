@@ -901,6 +901,152 @@ logging exposed (a real game genuinely missing from ESPN's response),
 but hasn't yet been tested against another real live game to confirm
 MSU's (or any other non-Top-25 favorite's) game now actually appears.
 
+## Real bug: timeouts always showed 3 regardless of actual remaining count
+
+Confirmed via explicit user report during the same live MSU game: Nebraska
+had 1 timeout left, but the display showed all 3 bars lit. Direct proof
+that `away.get("timeouts", 3)`/`home.get("timeouts", 3)` never actually
+found the field in ESPN's real response -- the `3` default was silently
+firing on every single game, which matched this project's own earlier
+"NOT CONFIRMED" caveat on this exact field.
+
+Researched the more likely real location after this report: multiple
+independent sources point to `situation.homeTimeouts`/
+`situation.awayTimeouts` (not per-competitor), and one confirms this
+exact field is known to be unreliable for college football specifically
+-- "timeouts remaining were only fixed... for NFL games in-progress;
+college games still don't work."
+
+**Fix:** switched extraction to `situation.get("awayTimeouts")`/
+`situation.get("homeTimeouts")`, defaulting to `None` (not `3`, and not
+the old per-competitor path) when genuinely absent. Rendering now skips
+the timeout indicator entirely when the value is `None`, rather than
+crash on `idx < None` or display a value that's likely wrong either way.
+
+**Verified:** confirmed `dict.get()` correctly returns `None` (not the
+old default) when a key exists with a `None` value, so this propagates
+cleanly from extraction through to rendering with no other code changes
+needed. Rendered a game with `away_timeouts=None`/`home_timeouts=1`
+directly -- no crash, and the real value renders correctly.
+
+**Not yet confirmed:** whether `situation.homeTimeouts`/`awayTimeouts`
+is itself reliably populated by ESPN, especially for college football
+given the source above -- this is the best-available fix given the
+evidence, but the underlying field may simply be unreliable at the
+API level regardless of what this plugin does.
+
+## Real bug: team logos invisible against their own background color
+
+Confirmed via explicit user report, specifically named for Michigan
+State, Iowa, and Utah: the logo was nearly impossible to see against its
+background. Root cause: the background behind each logo is filled with
+that team's own color (for team identity/branding), and a logo's
+dominant color frequently matches that team's own color BY DESIGN --
+MSU's green helmet on a green background, Iowa's black-and-gold on
+black, Utah's red on red. No tuning of which background color gets
+picked fixes this in general, since the match is intentional; the
+background and the logo are supposed to share that color for brand
+identity, which is exactly what defeats simple contrast at this pixel
+size.
+
+**Fix:** added a neutral ellipse backdrop behind the logo specifically
+(not the whole box, so the team's color still shows around the edges) --
+white by default, switching to black when the team's own color is
+already light (average brightness > 175), so a light/whitish team logo
+doesn't hit the identical problem in reverse. Sized to the logo's own
+fitted dimensions plus a small margin.
+
+**Verified:** rendered two synthetic test cases with an exact
+color-for-color match between a fake logo and its team background (dark
+green, matching MSU's actual reported problem, and a light/whitish
+color to test the reverse case) -- confirmed via direct visual
+inspection that the backdrop makes the previously-invisible logo clearly
+visible in both directions. Re-ran the full test-mode regression --
+still passes.
+
+## Feature: "END Q1"/"END Q2" display at end of quarter
+
+Per explicit request. Confirmed real ESPN value (not guessed):
+`status.type.name` is `"STATUS_END_PERIOD"` at the end of a quarter,
+alongside other known real values for the same field like
+`"STATUS_IN_PROGRESS"`/`"STATUS_HALFTIME"`/`"STATUS_FINAL"`.
+
+**Implementation:** extraction now sets `is_end_of_period` from this
+field. The live info row's rendering checks it and, when true, replaces
+the normal period+clock display (`"Q2" "2:14"`) with `"END Q2"` --
+clock is dropped since it would just read "0:00" at this point, which
+is redundant once already saying "END".
+
+**Verified:** fed a realistic mocked ESPN event with
+`status.type.name = "STATUS_END_PERIOD"` and `period = 2` through the
+real extraction -- confirmed `is_end_of_period` comes out `True`.
+Rendered the resulting game dict directly -- "END Q2" displays correctly
+in place of the normal period/clock text. Re-ran the full test-mode
+regression -- still passes.
+
+## Follow-up: suppress trailing field-position text at end of period
+
+Per explicit request: the down/distance and field-position (team
+abbreviation + yard line) text next to "END Q1"/"END Q2" wasn't wanted --
+neither is meaningful once the quarter has ended and there's no active
+play happening. Both are now suppressed whenever `is_end_of_period` is
+true, showing just "END Q2" alone. Verified via direct render.
+
+## Corrected: no 3-vs-4-letter abbreviation issue exists
+
+Initially reported as some teams (MSU, NEB) having 3-letter
+abbreviations while others (MICH, IOWA) have 4, colliding with the
+score. Checked this project's own extraction code first: `team_abbr()`
+has always sliced to `[:3]` -- every abbreviation is already capped at
+3 characters, confirmed directly from this project's own earlier
+diagnostic logs (`IOW@MIC`, not `IOWA`/`MICH`) and from the user
+double-checking the real display (UTA/MIS/IOW/MIC, all 3 letters). There
+was no 3-vs-4-letter discrepancy to fix.
+
+There IS a real, much smaller inconsistency: this plugin's bitmap font
+renders "N" 4px wide instead of the normal 3px (needed for its diagonal
+stroke to read correctly), so a 3-letter abbreviation containing an N
+(NEB, MIN, IND, etc.) is about 1px wider than one without (UTA, MIS,
+IOW, MIC). The score position was hardcoded to a fixed `x=40` regardless
+-- harmless for non-N abbreviations, but 1px too tight for N-containing
+ones.
+
+**Fix:** score position now derives from wherever the abbreviation loop
+actually finished (plus a small gap), instead of a fixed x. This
+self-corrects for any width variance regardless of its cause, not just
+the N-glyph case specifically.
+
+**Verified:** rendered UTA/MIC/IOW (no N) against NEB (has N) and
+confirmed via direct pixel inspection that NEB's content correctly
+spans 1px further right than the others, eliminating the inconsistency.
+Re-ran the full test-mode regression -- still passes.
+
+## Corrected again: the truncation to 3 characters was itself the bug
+
+Follow-up to the previous entry: clarified that the actual request was
+to STOP forcing every abbreviation down to 3 characters at all -- teams
+that are natively 4 characters in ESPN's own data (IOWA, MICH, NAVY,
+ARMY, etc.) should show all 4, not get cut down to IOW/MIC/NAV/ARM.
+
+Found this truncation baked into 5 separate places in `manager.py`, all
+slicing to `[:3]` -- the main extraction (`team_abbr()`), both
+`_draw_scorebug_layout` team-dict constructions, both
+`_draw_recent_layout`/`_draw_upcoming_layout` local abbreviation
+variables, and the field-position fallback in `_parse_possession_text`.
+Changed all 5 to `[:4]`, matching ESPN's own convention for football
+(never longer than 4).
+
+**Verified:** confirmed via direct extraction test that "IOWA" and
+"MICH" now come through as full 4-character strings, not truncated.
+Tested the worst realistic case directly -- a 4-character abbreviation
+that ALSO contains the wide N glyph (NAVY) plus a 2-digit score --
+and confirmed via direct pixel inspection it still fits with a 2px
+margin before the team-stack divider (the dynamic score-position fix
+from the previous entry is what makes this safe: it was always
+computing from the abbreviation's actual rendered width, so removing
+the length cap didn't require any additional layout change). Also
+re-ran the full test-mode regression -- still passes.
+
 ## Suggested next steps
 
 1. ~~Verify yard-line math~~ done above.

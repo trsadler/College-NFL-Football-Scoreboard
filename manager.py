@@ -258,6 +258,7 @@ ARROW_LEFT = ['00001', '00011', '00111', '00011', '00001']
 GOALPOST = ['10001', '10001', '11111', '00100', '00100', '00100']
 
 WHITE = (244, 244, 240)
+BLACK = (0, 0, 0)
 AMBER = (255, 176, 32)
 BROWN = (193, 102, 47)
 GOALPOST_YELLOW = (255, 205, 40)
@@ -901,7 +902,17 @@ class NFLCollegeScoreboardPlugin(BasePlugin):
             state = status_type.get("state", "pre")  # "pre" | "in" | "post"
 
             def team_abbr(competitor):
-                return competitor.get("team", {}).get("abbreviation", "")[:3].upper()
+                # Was [:3] -- explicitly changed per request: ESPN's own
+                # abbreviations for some teams (IOWA, MICH, NAVY, ARMY,
+                # etc.) are natively 4 characters, and forcibly truncating
+                # to 3 was cutting real teams down when they didn't need
+                # it (IOWA -> IOW, MICH -> MIC). Capped at 4 rather than
+                # left unbounded, since that's ESPN's own convention for
+                # football and never goes higher -- the layout (score
+                # position derived from the abbreviation's actual ending
+                # position, not fixed) already handles any length up to
+                # this correctly.
+                return competitor.get("team", {}).get("abbreviation", "")[:4].upper()
 
             def team_record(competitor):
                 """NOT fully confirmed against real captured data (same
@@ -971,6 +982,13 @@ class NFLCollegeScoreboardPlugin(BasePlugin):
                 "period": status.get("period", 0),
                 "period_text": f"Q{status.get('period')}" if status.get("period") else "",
                 "clock": status.get("displayClock", ""),
+                # Confirmed real ESPN value (not guessed): status.type.name
+                # is "STATUS_END_PERIOD" at the end of a quarter, alongside
+                # others like "STATUS_IN_PROGRESS"/"STATUS_HALFTIME"/
+                # "STATUS_FINAL". Used to show "END Q1"/"END Q2" etc.
+                # instead of the normal period+clock display, per explicit
+                # request.
+                "is_end_of_period": status_type.get("name") == "STATUS_END_PERIOD",
                 "home_linescores": parse_linescores(home),
                 "away_linescores": parse_linescores(away),
             }
@@ -998,16 +1016,25 @@ class NFLCollegeScoreboardPlugin(BasePlugin):
                 or ""
             )
 
-            # NOT CONFIRMED against real captured data -- ESPN's
-            # lightweight scoreboard response may not include timeouts
-            # remaining at all (baseball's own extraction notes several
-            # fields, like hits/errors, that simply aren't present at this
-            # endpoint and need the detailed summary endpoint instead).
-            # Defaulting to 3 (a full allotment) rather than 0, so an
-            # unpopulated value doesn't misleadingly render as "all
-            # timeouts used."
-            details["away_timeouts"] = away.get("timeouts", 3)
-            details["home_timeouts"] = home.get("timeouts", 3)
+            # REAL BUG, CONFIRMED via explicit user report: this always
+            # showed 3 regardless of actual timeouts remaining (a real
+            # game showing Nebraska with 1 timeout left still displayed
+            # all 3 bars lit) -- direct proof away.get("timeouts")/
+            # home.get("timeouts") never actually existed in ESPN's real
+            # response; the `3` default was silently firing on every
+            # single game. Multiple independent sources researched after
+            # this report converge on `situation.homeTimeouts`/
+            # `situation.awayTimeouts` as the more likely real field
+            # location (not per-competitor) -- one directly confirms this
+            # exact field is known to be unreliable for college football
+            # specifically ("timeouts remaining were only fixed... for
+            # NFL games in-progress; college games still don't work").
+            # Given that, defaulting to None (not 3, and not the
+            # per-competitor path) when genuinely missing, so the
+            # rendering code can skip the indicator entirely rather than
+            # display a value that's wrong either way.
+            details["away_timeouts"] = situation.get("awayTimeouts")
+            details["home_timeouts"] = situation.get("homeTimeouts")
 
             # ESPN's scoreboard-level `leaders` -- combined across BOTH
             # teams (one top passer/rusher/receiver for the whole game,
@@ -1444,7 +1471,7 @@ class NFLCollegeScoreboardPlugin(BasePlugin):
         league = game.get("league")
         return [
             {
-                "abbr": game.get("away_abbr", "")[:3].upper(),
+                "abbr": game.get("away_abbr", "")[:4].upper(),
                 "score": str(game.get("away_score", 0)),
                 "color": game.get("away_color", (60, 60, 60)),
                 "possession": possession == "away",
@@ -1456,7 +1483,7 @@ class NFLCollegeScoreboardPlugin(BasePlugin):
                 "league": league,
             },
             {
-                "abbr": game.get("home_abbr", "")[:3].upper(),
+                "abbr": game.get("home_abbr", "")[:4].upper(),
                 "score": str(game.get("home_score", 0)),
                 "color": game.get("home_color", (60, 60, 60)),
                 "possession": possession == "home",
@@ -1712,8 +1739,8 @@ class NFLCollegeScoreboardPlugin(BasePlugin):
 
             away_color = game.get("away_color", (60, 60, 60))
             home_color = game.get("home_color", (60, 60, 60))
-            away_abbr = game.get("away_abbr", "")[:3].upper()
-            home_abbr = game.get("home_abbr", "")[:3].upper()
+            away_abbr = game.get("away_abbr", "")[:4].upper()
+            home_abbr = game.get("home_abbr", "")[:4].upper()
             away_record = game.get("away_record", "")
             home_record = game.get("home_record", "")
 
@@ -1893,10 +1920,43 @@ class NFLCollegeScoreboardPlugin(BasePlugin):
                 # of the team's color so mismatched logo aspect ratios don't
                 # leave an awkward black gap.
                 draw.rectangle([0, y_base, 24, y_base + 15], fill=team["color"])
+
+                # REAL BUG, CONFIRMED via explicit user report: for teams
+                # like Michigan State, Iowa, and Utah, the logo was nearly
+                # invisible against its own background -- because the
+                # background here is filled with the team's own color,
+                # and a logo's dominant color frequently matches that
+                # team's color by design (MSU's green helmet on a green
+                # background, Iowa's black-and-gold on black, Utah's red
+                # on red). No amount of tuning the background color choice
+                # fixes this in general, since it's the SAME color on
+                # purpose for team identity -- any fix has to break that
+                # match specifically behind the logo.
+                #
+                # Fix: an ellipse backdrop behind the logo only (not the
+                # whole box, so the team color still shows around the
+                # edges for identity), white by default but switching to
+                # black when the team's own color is already
+                # light/whitish (otherwise a white team like a mostly-white
+                # helmet logo would face the identical problem in
+                # reverse). Sized to the logo's own fitted dimensions plus
+                # a small margin, not the full box, so it doesn't overwhelm
+                # the limited 25x16 space.
                 fitted = logo.copy()
                 fitted.thumbnail((25, 16), Image.Resampling.LANCZOS)
                 paste_x = (25 - fitted.width) // 2
                 paste_y = y_base + (16 - fitted.height) // 2
+
+                team_brightness = sum(team["color"]) / 3
+                backdrop_color = BLACK if team_brightness > 175 else WHITE
+                margin = 1
+                draw.ellipse(
+                    [
+                        paste_x - margin, paste_y - margin,
+                        paste_x + fitted.width + margin, paste_y + fitted.height + margin,
+                    ],
+                    fill=backdrop_color,
+                )
                 img.paste(fitted, (paste_x, paste_y), fitted)
             else:
                 # Fallback: flat color swatch if the logo couldn't be loaded
@@ -1905,12 +1965,18 @@ class NFLCollegeScoreboardPlugin(BasePlugin):
                 # this is a last-resort, not the expected common path)
                 draw.rectangle([0, y_base, 24, y_base + 15], fill=team["color"])
 
-            # Abbreviation + score, side by side
+            # Abbreviation + score, side by side. Score position is
+            # derived from wherever the abbreviation actually ended (plus
+            # a small gap), not a fixed x -- confirmed real bug: a
+            # hardcoded x=40 fit 3-letter abbreviations like MSU/NEB fine,
+            # but a 4-letter one like MICH/IOWA runs past that point,
+            # colliding with the score digits. Using the real ending
+            # position scales correctly for both.
             x = 27
             for ch in team["abbr"]:
                 self._draw_char(draw, FONT, ch, x, y_base + 5, WHITE)
                 x += self._char_adv(ch)
-            x = 40
+            x += 2
             score_color = team.get("score_color", AMBER)
             for ch in team["score"]:
                 self._draw_char(draw, FONT, ch, x, y_base + 5, score_color)
@@ -1928,12 +1994,18 @@ class NFLCollegeScoreboardPlugin(BasePlugin):
                         if bit == '1':
                             draw.point((49 + col, y_base + 5 + row), fill=BROWN)
 
-            # Timeout row: horizontal, left-aligned with abbreviation
-            segments = [(27, 29), (31, 33), (35, 37)]
-            for idx, (sx, ex) in enumerate(segments):
-                color = WHITE if idx < team["timeouts"] else None
-                if color:
-                    draw.line([(sx, y_base + 12), (ex, y_base + 12)], fill=color)
+            # Timeout row: horizontal, left-aligned with abbreviation.
+            # team["timeouts"] can genuinely be None (ESPN doesn't
+            # reliably expose this, confirmed by a real report of it
+            # always showing 3 regardless of actual remaining count) --
+            # skip drawing anything at all rather than crash on
+            # `idx < None` or show a value that's likely wrong.
+            if team["timeouts"] is not None:
+                segments = [(27, 29), (31, 33), (35, 37)]
+                for idx, (sx, ex) in enumerate(segments):
+                    color = WHITE if idx < team["timeouts"] else None
+                    if color:
+                        draw.line([(sx, y_base + 12), (ex, y_base + 12)], fill=color)
 
     def _draw_divider(self, draw):
         draw.line([(54, 0), (54, 31)], fill=(200, 205, 200))
@@ -2042,7 +2114,7 @@ class NFLCollegeScoreboardPlugin(BasePlugin):
         # Fallback: not ideal (this re-derives rather than trusting ESPN's
         # own resolved label), but keeps the display from going blank.
         possession_side = game.get("possession_indicator")
-        fallback_team = game.get("away_abbr" if possession_side == "away" else "home_abbr", "")[:3].upper()
+        fallback_team = game.get("away_abbr" if possession_side == "away" else "home_abbr", "")[:4].upper()
         yard_line = game.get("yard_line")
         fallback_yard = str(int(yard_line)) if yard_line is not None else ""
         return fallback_team, f"{fallback_team} {fallback_yard}".strip(), fallback_yard
@@ -2066,11 +2138,24 @@ class NFLCollegeScoreboardPlugin(BasePlugin):
 
         period_text = game.get("period_text", "")
         clock = game.get("clock", "")
-        # ESPN's shortDownDistanceText comes back like "3rd & 7" -- our font is
-        # uppercase-only and we render tight (no spaces) like "4TH&3", so
-        # normalize both before drawing.
-        down_distance = (game.get("down_distance_text", "") or "").upper().replace(" ", "")
-        _, field_pos_str, _ = self._parse_possession_text(game)
+        is_end_of_period = bool(game.get("is_end_of_period") and game.get("period"))
+        # Per explicit request: at the end of a quarter, show "END Q1"/
+        # "END Q2" etc. instead of the normal period+clock display (the
+        # clock would just read "0:00" at this point anyway, redundant
+        # once we're already saying "END").
+        if is_end_of_period:
+            period_text = f"END Q{game['period']}"
+            clock = ""
+        # Per explicit follow-up request: down/distance and field position
+        # (team abbreviation + yard line) are both suppressed at end of
+        # period too -- neither is meaningful once the quarter has ended
+        # and there's no active play to report on; showing them just
+        # reads as confusing leftover state next to "END Q2".
+        down_distance = (
+            "" if is_end_of_period
+            else (game.get("down_distance_text", "") or "").upper().replace(" ", "")
+        )
+        field_pos_str = "" if is_end_of_period else self._parse_possession_text(game)[1]
 
         for ch in period_text:
             draw_char(ch, WHITE)
