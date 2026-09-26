@@ -27,6 +27,7 @@ API Version: 1.0.0
 from typing import Dict, Any, Optional, List, Tuple
 import logging
 import time
+import tempfile
 import os
 from pathlib import Path
 from datetime import datetime, timedelta
@@ -399,7 +400,23 @@ class NFLCollegeScoreboardPlugin(BasePlugin):
         # Where downloaded (non-bundled) logos get cached to disk between
         # polls, keyed the same way -- avoids re-downloading from ESPN
         # every single update() cycle for teams with no local asset.
-        self._logo_disk_cache_dir = os.path.join(PLUGIN_DIR, "logo_cache")
+        #
+        # REAL BUG FOUND AND FIXED HERE: this used to be
+        # os.path.join(PLUGIN_DIR, "logo_cache") -- inside the plugin's
+        # own install folder. Confirmed on real hardware: updating the
+        # plugin failed with "Failed to remove logo_cache/
+        # college-football_ARS.png: Permission denied", because files
+        # this plugin's own runtime process downloaded and wrote ended up
+        # with permissions/ownership the UPDATE process (running as a
+        # different user, or at a different point in the permission
+        # chain) couldn't delete during its own cleanup step. Baseball's
+        # own current source never writes downloaded logos to disk at all
+        # -- only ever caches them in memory (self._logo_cache) -- so this
+        # was a deviation from its proven pattern that created a real
+        # deployment problem. Using the system temp directory instead:
+        # completely outside the plugin's own folder structure, so it can
+        # never conflict with a future plugin update/reinstall again.
+        self._logo_disk_cache_dir = os.path.join(tempfile.gettempdir(), "nfl-college-scoreboard-logos")
 
         # Cache for _fetch_recent_lookback()'s results, keyed by league --
         # refreshed on its own slower timer (recent.update_interval_seconds,
@@ -1024,7 +1041,12 @@ class NFLCollegeScoreboardPlugin(BasePlugin):
         if not url:
             return
 
-        os.makedirs(self._logo_disk_cache_dir, exist_ok=True)
+        try:
+            os.makedirs(self._logo_disk_cache_dir, exist_ok=True)
+        except Exception as e:
+            self.logger.debug(f"Could not create logo cache dir: {e}")
+            return
+
         cache_path = os.path.join(self._logo_disk_cache_dir, f"{league}_{abbr}.png")
         if os.path.isfile(cache_path):
             game[f"{side}_logo_path"] = cache_path

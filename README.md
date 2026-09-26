@@ -816,6 +816,43 @@ only suppresses them while something is actually live. Re-ran the full
 test-mode regression -- still passes (that path doesn't go through
 `display_mode` at all, so it's unaffected by this change).
 
+## Real bug: logo cache broke plugin updates with a Permission denied error
+
+Confirmed via real hardware: updating the plugin failed with `Failed to
+remove logo_cache/college-football_ARS.png: Permission denied`. Root
+cause: downloaded (non-bundled) team logos were being cached to disk
+inside the plugin's OWN install folder
+(`os.path.join(PLUGIN_DIR, "logo_cache")`). Files this plugin's own
+runtime process wrote there ended up with permissions/ownership the
+update process (running as a different user, or at a different point in
+the permission chain) couldn't clean up during its own removal step.
+
+Re-checked baseball's current source for comparison: it never writes
+downloaded logos to disk at all -- only ever caches them in memory. This
+plugin's disk-caching was a deviation from that proven pattern, and it's
+what created this real deployment problem.
+
+**Fix:** moved the logo disk cache to the system temp directory
+(`tempfile.gettempdir()/nfl-college-scoreboard-logos`) instead of inside
+the plugin's own folder -- completely outside anywhere a plugin
+update/reinstall would ever need to touch, so it can't conflict again.
+Also wrapped the cache directory creation in its own try/except (it
+wasn't before), so any future issue with this cache degrades gracefully
+(falls back to no cached logo, not a crash) rather than ever taking down
+the broader fetch pipeline with it.
+
+**Verified:** confirmed the resulting path is `/tmp/
+nfl-college-scoreboard-logos`, genuinely outside the plugin's own
+install directory. Re-ran the full test-mode regression -- still passes.
+
+**Separately noted, not yet fixed:** `show_all_live` exists in
+`config_schema.json` but isn't referenced anywhere in the current
+`manager.py` at all -- a leftover from before the full architecture
+rewrite. Not currently causing any problem (favorite-exclusive live
+priority is already applied unconditionally, which happens to match
+what this setting implies it should do), but it's a dead, misleading
+config option that should either be wired up or removed for clarity.
+
 ## Suggested next steps
 
 1. ~~Verify yard-line math~~ done above.
