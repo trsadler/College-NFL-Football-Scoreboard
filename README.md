@@ -1256,6 +1256,44 @@ test) while college football is forced to `None` for both, even though
 the same mock data included non-null values for both team's timeouts.
 Re-ran the full test-mode regression -- still passes.
 
+## Real bug: cross-plugin priority never worked -- a required config key was simply missing
+
+Explicit question asked: does this plugin prevent other plugins from
+cycling in while a favorite is live, the way baseball does? Checked
+directly rather than assume -- confirmed baseball's own
+`config_schema.json` documents that `has_live_content()` (added to this
+plugin in an earlier round) is only HALF of what's needed:
+`BasePlugin.has_live_priority()` -- already implemented by the framework
+itself, not something a plugin overrides -- also has to return true, and
+it does so by reading a **top-level** `live_priority` config key.
+
+This plugin's config schema never had one. It only has a
+similarly-named `live.live_priority` key nested under `live`, which
+controls something entirely different -- favorite-team ordering within
+this plugin's OWN live-game selection, not whether the broader system
+stays on this plugin at all. Since the top-level key genuinely didn't
+exist, `has_live_priority()` had nothing real to read, so cross-plugin
+priority could never actually trigger regardless of `has_live_content()`
+already working correctly.
+
+**Fix:** added the missing top-level `live_priority` boolean (default
+`false`, matching baseball's own opt-in-deliberately default, since it
+changes cross-plugin behavior). Also clarified the existing nested
+`live.live_priority` description to explicitly distinguish it from the
+new top-level one, since the two now have easily-confused similar names.
+
+**Verified:** confirmed the new key sits at the correct top level (not
+nested) via direct schema inspection, confirmed the existing nested-key
+code path (`live_cfg.get("live_priority", True)`, reading from
+`self.config.get("live", {})`) is entirely separate and unaffected,
+confirmed the JSON schema is still valid, and re-ran the full test-mode
+regression -- still passes. **Not independently verified beyond this**:
+whether the real `BasePlugin.has_live_priority()` implementation reads
+this exact key name the way baseball's own documentation describes --
+that part relies entirely on baseball's own comment being accurate,
+since this plugin has no way to inspect the framework's real source
+directly.
+
 ## Suggested next steps
 
 1. ~~Verify yard-line math~~ done above.

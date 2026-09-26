@@ -25,6 +25,11 @@
       "default": false,
       "description": "If true, only ever show games involving a favorite team. If false, show all games but let live_priority/favorite ordering below still apply."
     },
+    "live_priority": {
+      "type": "boolean",
+      "default": false,
+      "description": "Read directly by the LEDMatrix framework's own BasePlugin.has_live_priority() -- when true, and a favorite team is currently live (has_live_content()), the display controller stays on THIS plugin instead of rotating to a different plugin. Distinct from live.live_priority below: that setting controls favorite ordering WITHIN this plugin's own live-game selection; this one controls whether the broader system rotates AWAY from this plugin at all. Off by default since it changes cross-plugin behavior -- opt in deliberately."
+    },
 
     "live": {
       "type": "object",
@@ -39,7 +44,7 @@
         "live_priority": {
           "type": "boolean",
           "default": true,
-          "description": "If any favorite team is currently live, jump to/stay on that game ahead of other live games in the rotation."
+          "description": "If any favorite team is currently live, jump to/stay on that game ahead of other live games in this plugin's own live rotation. Not the same as the top-level live_priority setting -- that one controls whether the SYSTEM stays on this plugin instead of switching to a different one; this one only affects which game this plugin itself shows once it's already on screen."
         },
         "update_interval_seconds": {
           "type": "number",
