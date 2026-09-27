@@ -1970,15 +1970,24 @@ class NFLCollegeScoreboardPlugin(BasePlugin):
                 # aren't a perfect 21:16 aspect ratio, so thumbnail()
                 # shrinks them further than either dimension alone to
                 # preserve their proportions, often landing well under
-                # both limits. Per explicit direction, sized up
-                # significantly (28, 24) and accepted that logos will now
-                # routinely extend past this block's own boundaries and
-                # get clipped -- legibility matters more than staying
-                # perfectly inside the box. paste_x/paste_y can go
-                # negative here on purpose (centering an image larger
-                # than its nominal box) -- PIL simply clips anything
-                # outside the canvas, which is exactly the intended look.
-                fitted.thumbnail((28, 24), Image.Resampling.LANCZOS)
+                # both limits.
+                #
+                # First enlargement attempt (28, 24) was ALSO confirmed
+                # wrong via a second explicit report: the 24px vertical
+                # target overflowed 4px into EACH adjacent team's row
+                # (direct math: (16-24)//2 = -4), most noticeable as the
+                # bottom team's logo visibly bleeding upward into the top
+                # row. Reduced the vertical target to 18px -- only 1px of
+                # overflow per side now ((16-18)//2 = -1), much less
+                # disruptive -- while keeping the wider 28px horizontal
+                # target, since that dimension wasn't reported as a
+                # problem and doesn't reach the abbreviation text starting
+                # at x=27 (confirmed: even a 28px-wide logo's right edge
+                # lands around x=24-25, still short of it). paste_x/
+                # paste_y can still go negative on purpose (centering an
+                # image larger than its nominal box); PIL simply clips
+                # anything outside the canvas.
+                fitted.thumbnail((28, 18), Image.Resampling.LANCZOS)
                 paste_x = (21 - fitted.width) // 2
                 paste_y = y_base + (16 - fitted.height) // 2
                 img.paste(fitted, (paste_x, paste_y), fitted)

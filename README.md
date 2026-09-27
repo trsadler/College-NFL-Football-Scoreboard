@@ -1318,6 +1318,30 @@ the logo, so they render on top of any overlap) all still display
 correctly and readably alongside the now-larger logos. Re-ran the full
 test-mode regression -- still passes.
 
+## Real bug: the logo enlargement fix (previous entry) overflowed into the adjacent row
+
+Confirmed via explicit user report: after enlarging logos to (28, 24),
+logos were spilling into the OTHER team's row, worse for the bottom
+team's logo bleeding upward into the top row. Computed the exact cause
+directly rather than guess: each team's row is only 16px tall, and a
+24px-tall target centers at `(16-24)//2 = -4` -- a confirmed 4px
+overflow into EACH adjacent row, not a subtle rounding issue but a
+real, sizable intrusion.
+
+**Fix:** reduced the vertical target to 18px -- `(16-18)//2 = -1`, only
+1px of overflow per side now, much less disruptive -- while keeping the
+wider 28px horizontal target from the previous fix, since that dimension
+wasn't reported as a problem (confirmed: even a 28px-wide logo's right
+edge lands around x=24-25, still short of the abbreviation text starting
+at x=27).
+
+**Verified:** re-rendered the same two-team stack (BUF/KC) used to
+confirm the original enlargement, and confirmed via direct visual
+inspection that there's no more visible spillover between the two
+rows, while both logos remain noticeably larger than the original
+too-small (21, 16) size that started this whole round of fixes. Re-ran
+the full test-mode regression -- still passes.
+
 ## Suggested next steps
 
 1. ~~Verify yard-line math~~ done above.
