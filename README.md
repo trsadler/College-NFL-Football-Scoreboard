@@ -1294,6 +1294,30 @@ that part relies entirely on baseball's own comment being accurate,
 since this plugin has no way to inspect the framework's real source
 directly.
 
+## Logos enlarged, allowed to extend past their box boundaries
+
+Confirmed via explicit user report: at the previous (21, 16) target
+size, several logos were barely legible. Root cause of why they ended
+up smaller than either limit: most real logos aren't a perfect 21:16
+aspect ratio, so `thumbnail()` shrinks to whichever dimension is the
+tighter constraint to preserve proportions -- often landing well under
+both limits rather than filling either one.
+
+**Fix, per explicit direction:** increased the target size to (28, 24)
+and accepted that logos will now often extend past this block's own
+boundaries and get clipped -- legibility was explicitly prioritized over
+staying perfectly inside the box. `paste_x`/`paste_y` can go negative
+now on purpose (centering an image larger than its nominal box); PIL
+simply clips anything outside the canvas, which is the intended look.
+
+**Verified:** rendered both a synthetic non-square logo and two real
+bundled logos (BUF, KC) at the new size -- confirmed via visual
+inspection both are noticeably larger and more detailed/legible than
+before, while the abbreviation, score, and possession icon (drawn after
+the logo, so they render on top of any overlap) all still display
+correctly and readably alongside the now-larger logos. Re-ran the full
+test-mode regression -- still passes.
+
 ## Suggested next steps
 
 1. ~~Verify yard-line math~~ done above.

@@ -1964,11 +1964,21 @@ class NFLCollegeScoreboardPlugin(BasePlugin):
                     bg_color = tuple(max(0, int(c * 0.55)) for c in team["color"])
                 draw.rectangle([0, y_base, 24, y_base + 15], fill=bg_color)
                 fitted = logo.copy()
-                # Shifted slightly left within the block (was dead-center
-                # across the full 25px width) per explicit request, to
-                # open up room on the right side of the block for the
-                # possession icon -- see below.
-                fitted.thumbnail((21, 16), Image.Resampling.LANCZOS)
+                # REAL ISSUE, CONFIRMED via explicit user report: at the
+                # previous (21, 16) target size, many logos ended up too
+                # small to read clearly on a real display -- most logos
+                # aren't a perfect 21:16 aspect ratio, so thumbnail()
+                # shrinks them further than either dimension alone to
+                # preserve their proportions, often landing well under
+                # both limits. Per explicit direction, sized up
+                # significantly (28, 24) and accepted that logos will now
+                # routinely extend past this block's own boundaries and
+                # get clipped -- legibility matters more than staying
+                # perfectly inside the box. paste_x/paste_y can go
+                # negative here on purpose (centering an image larger
+                # than its nominal box) -- PIL simply clips anything
+                # outside the canvas, which is exactly the intended look.
+                fitted.thumbnail((28, 24), Image.Resampling.LANCZOS)
                 paste_x = (21 - fitted.width) // 2
                 paste_y = y_base + (16 - fitted.height) // 2
                 img.paste(fitted, (paste_x, paste_y), fitted)
